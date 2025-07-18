@@ -1,227 +1,211 @@
 import os
-import json
 import asyncio
-from typing import List, Dict, Any, Optional
-from fastapi import FastAPI, HTTPException, Query, Request
+from typing import Optional, List, Dict, Any
+from fastapi import FastAPI, HTTPException, Request, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from starlette.middleware.cors import CORSMiddleware
-from pymodbus.client.async_tcp import AsyncModbusTCPClient
-from pymodbus.client import AsyncModbusSerialClient
+from pymodbus.client.asynchronous.tcp import AsyncModbusTCPClient
+from pymodbus.client.asynchronous.serial import AsyncModbusSerialClient
+from pymodbus.payload import BinaryPayloadBuilder, BinaryPayloadDecoder
 from pymodbus.constants import Endian
-from pymodbus.payload import BinaryPayloadDecoder, BinaryPayloadBuilder
+from pymodbus.exceptions import ModbusException
+import uvicorn
 
-# --- Configuration from Environment Variables ---
-DEVICE_IP = os.environ.get("DEVICE_IP", "127.0.0.1")
-MODBUS_TCP_PORT = int(os.environ.get("MODBUS_TCP_PORT", "502"))
-MODBUS_RTU_PORT = os.environ.get("MODBUS_RTU_PORT")  # e.g., "/dev/ttyUSB0"
-MODBUS_RTU_BAUDRATE = int(os.environ.get("MODBUS_RTU_BAUDRATE", "9600"))
-MODBUS_SLAVE_ID = int(os.environ.get("MODBUS_SLAVE_ID", "1"))
+# Configuration from environment variables
+MODBUS_MODE = os.getenv("MODBUS_MODE", "tcp").lower()  # "tcp" or "rtu"
+MODBUS_TCP_HOST = os.getenv("MODBUS_TCP_HOST", "127.0.0.1")
+MODBUS_TCP_PORT = int(os.getenv("MODBUS_TCP_PORT", "502"))
+MODBUS_RTU_PORT = os.getenv("MODBUS_RTU_PORT", "/dev/ttyUSB0")
+MODBUS_RTU_BAUDRATE = int(os.getenv("MODBUS_RTU_BAUDRATE", "9600"))
+MODBUS_RTU_PARITY = os.getenv("MODBUS_RTU_PARITY", "N")
+MODBUS_RTU_STOPBITS = int(os.getenv("MODBUS_RTU_STOPBITS", "1"))
+MODBUS_RTU_BYTESIZE = int(os.getenv("MODBUS_RTU_BYTESIZE", "8"))
+MODBUS_UNIT_ID = int(os.getenv("MODBUS_UNIT_ID", "1"))
+SERVER_HOST = os.getenv("SERVER_HOST", "0.0.0.0")
+SERVER_PORT = int(os.getenv("SERVER_PORT", "8080"))
+MODBUS_TIMEOUT = float(os.getenv("MODBUS_TIMEOUT", "5.0"))
+MODBUS_RETRIES = int(os.getenv("MODBUS_RETRIES", "1"))
 
-SERVER_HOST = os.environ.get("SERVER_HOST", "0.0.0.0")
-SERVER_PORT = int(os.environ.get("SERVER_PORT", "8080"))
-PROTOCOL = os.environ.get("PROTOCOL", "TCP").upper()  # "TCP" or "RTU"
-
-# --- Register Map (Huawei SUN2000) ---
-REGISTERS = {
-    "model": (30000, 6, "string"),                  # 6 registers (12 bytes)
-    "serial_number": (30015, 10, "string"),         # 10 registers (20 bytes)
-    "firmware_version": (30035, 6, "string"),       # 6 registers (12 bytes)
-    "rated_power": (30073, 2, "uint32"),            # 2 registers (uint32)
-    "active_power": (32080, 2, "int32"),            # 2 registers (int32)
-    "reactive_power": (32082, 2, "int32"),          # 2 registers (int32)
-    "voltage_ph1": (32066, 2, "uint32"),            # 2 registers (uint32)
-    "voltage_ph2": (32068, 2, "uint32"),
-    "voltage_ph3": (32070, 2, "uint32"),
-    "current_ph1": (32072, 2, "int32"),
-    "current_ph2": (32074, 2, "int32"),
-    "current_ph3": (32076, 2, "int32"),
+# Register Map
+REGISTER_MAP = {
+    "model": (30000, 10, "string"),
+    "serial_number": (30015, 10, "string"),
+    "firmware_version": (30035, 5, "string"),
+    "rated_power": (30073, 2, "uint32"),
+    "active_power": (32080, 2, "int32"),
+    "reactive_power": (32082, 2, "int32"),
+    "voltages": (32066, 6, "multi_uint16"),
     "power_factor": (32084, 2, "int32"),
     "frequency": (32085, 2, "uint32"),
-    "total_energy": (32106, 2, "uint32"),           # 2 registers (uint32), Wh (divide by 100 for kWh)
-    "alarm_code": (32090, 1, "uint16"),
+    "total_energy": (32106, 4, "uint64"),
+    "alarm_codes": (32090, 4, "multi_uint16"),
 }
 
-# --- FastAPI App ---
-app = FastAPI(title="Huawei SUN2000 Solar Inverter HTTP DeviceShifu Driver")
+TELEMETRY_REGISTERS = {
+    "active_power": REGISTER_MAP["active_power"],
+    "reactive_power": REGISTER_MAP["reactive_power"],
+    "voltages": REGISTER_MAP["voltages"],
+    "power_factor": REGISTER_MAP["power_factor"],
+    "frequency": REGISTER_MAP["frequency"],
+    "total_energy": REGISTER_MAP["total_energy"],
+    "alarm_codes": REGISTER_MAP["alarm_codes"],
+}
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+DEVICE_REGISTERS = {
+    "model": REGISTER_MAP["model"],
+    "serial_number": REGISTER_MAP["serial_number"],
+    "firmware_version": REGISTER_MAP["firmware_version"],
+    "rated_power": REGISTER_MAP["rated_power"],
+}
 
-# --- Modbus Connection Management ---
-class ModbusClient:
-    _tcp_client: Optional[AsyncModbusTCPClient] = None
-    _rtu_client: Optional[AsyncModbusSerialClient] = None
+# FastAPI setup
+app = FastAPI(title="Huawei SUN2000 DeviceShifu Driver")
 
-    @classmethod
-    async def get_client(cls):
-        if PROTOCOL == "TCP":
-            if cls._tcp_client is None:
-                cls._tcp_client = AsyncModbusTCPClient(
-                    host=DEVICE_IP, port=MODBUS_TCP_PORT, timeout=3
-                )
-                await cls._tcp_client.connect()
-            return cls._tcp_client
-        elif PROTOCOL == "RTU":
-            if not MODBUS_RTU_PORT:
-                raise RuntimeError("MODBUS_RTU_PORT environment variable not set.")
-            if cls._rtu_client is None:
-                cls._rtu_client = AsyncModbusSerialClient(
-                    method="rtu",
-                    port=MODBUS_RTU_PORT,
-                    baudrate=MODBUS_RTU_BAUDRATE,
-                    stopbits=1,
-                    bytesize=8,
-                    parity="N",
-                    timeout=3,
-                )
-                await cls._rtu_client.connect()
-            return cls._rtu_client
-        else:
-            raise RuntimeError(f"Unsupported protocol: {PROTOCOL}")
+# Modbus Client references
+modbus_client = None
+modbus_protocol = None
 
-    @classmethod
-    async def close_clients(cls):
-        if cls._tcp_client is not None:
-            await cls._tcp_client.close()
-        if cls._rtu_client is not None:
-            await cls._rtu_client.close()
-
-# --- Utility Functions ---
-def decode_string(registers: List[int]) -> str:
-    byte_array = bytearray()
-    for r in registers:
-        byte_array += r.to_bytes(2, "big")
-    return byte_array.decode("ascii", errors="ignore").strip("\x00 ")
-
-def decode_uint32(registers: List[int]) -> int:
-    return (registers[0] << 16) + registers[1]
-
-def decode_int32(registers: List[int]) -> int:
-    value = (registers[0] << 16) + registers[1]
-    if value & 0x80000000:
-        value -= 0x100000000
-    return value
-
-def decode_uint16(registers: List[int]) -> int:
-    return registers[0]
-
-def decode_value(data_type: str, registers: List[int]) -> Any:
-    if data_type == "string":
-        return decode_string(registers)
-    elif data_type == "uint32":
-        return decode_uint32(registers)
-    elif data_type == "int32":
-        return decode_int32(registers)
-    elif data_type == "uint16":
-        return decode_uint16(registers)
+# Utility: Decode Modbus register data
+def decode_value(register_type: str, registers: List[int]) -> Any:
+    decoder = BinaryPayloadDecoder.fromRegisters(registers, byteorder=Endian.Big, wordorder=Endian.Big)
+    if register_type == "string":
+        s = "".join(chr((reg >> 8) & 0xFF) + chr(reg & 0xFF) for reg in registers)
+        return s.strip("\x00 ")
+    elif register_type == "uint32":
+        return decoder.decode_32bit_uint()
+    elif register_type == "int32":
+        return decoder.decode_32bit_int()
+    elif register_type == "uint64":
+        return decoder.decode_64bit_uint()
+    elif register_type == "multi_uint16":
+        return list(registers)
     else:
         return registers
 
-async def read_register(address: int, count: int) -> List[int]:
-    client = await ModbusClient.get_client()
-    resp = await client.protocol.read_holding_registers(address, count, unit=MODBUS_SLAVE_ID)
-    if not resp or hasattr(resp, "isError") and resp.isError():
-        raise HTTPException(status_code=502, detail="Modbus read error")
-    return list(resp.registers)
+# Utility: Read holding registers with retries
+async def modbus_read(address: int, count: int) -> List[int]:
+    for attempt in range(MODBUS_RETRIES + 1):
+        try:
+            if MODBUS_MODE == "tcp":
+                rr = await modbus_client.read_holding_registers(address, count, unit=MODBUS_UNIT_ID)
+            else:
+                rr = await modbus_client.read_holding_registers(address, count, unit=MODBUS_UNIT_ID)
+            if rr.isError():
+                raise ModbusException(str(rr))
+            return rr.registers
+        except Exception as e:
+            if attempt == MODBUS_RETRIES:
+                raise
+            await asyncio.sleep(0.2)
+    raise HTTPException(status_code=500, detail="Modbus read failed.")
 
-async def write_register(address: int, values: List[int]) -> None:
-    client = await ModbusClient.get_client()
-    if len(values) == 1:
-        resp = await client.protocol.write_register(address, values[0], unit=MODBUS_SLAVE_ID)
-    else:
-        resp = await client.protocol.write_registers(address, values, unit=MODBUS_SLAVE_ID)
-    if not resp or hasattr(resp, "isError") and resp.isError():
-        raise HTTPException(status_code=502, detail="Modbus write error")
+# Utility: Write holding registers with retries (single or multiple)
+async def modbus_write(address: int, values: List[int]) -> None:
+    for attempt in range(MODBUS_RETRIES + 1):
+        try:
+            if len(values) == 1:
+                rr = await modbus_client.write_register(address, values[0], unit=MODBUS_UNIT_ID)
+            else:
+                rr = await modbus_client.write_registers(address, values, unit=MODBUS_UNIT_ID)
+            if rr.isError():
+                raise ModbusException(str(rr))
+            return
+        except Exception as e:
+            if attempt == MODBUS_RETRIES:
+                raise
+            await asyncio.sleep(0.2)
+    raise HTTPException(status_code=500, detail="Modbus write failed.")
 
-# --- API Models ---
-class ControlPayload(BaseModel):
-    registers: Dict[str, Any]
+# ----------- API Models -----------
 
-# --- API Endpoints ---
-@app.get("/device")
+class ControlRequest(BaseModel):
+    # Example: {"registers": [{"address":42000, "values":[100]}, ...]}
+    registers: List[Dict[str, Any]]
+
+class ControlResponse(BaseModel):
+    success: bool
+    details: str
+
+# ----------- API Endpoints -----------
+
+@app.get("/device", response_class=JSONResponse)
 async def get_device_info():
-    try:
-        model_regs = await read_register(*REGISTERS["model"][:2])
-        serial_regs = await read_register(*REGISTERS["serial_number"][:2])
-        fw_regs = await read_register(*REGISTERS["firmware_version"][:2])
-        rated_power_regs = await read_register(*REGISTERS["rated_power"][:2])
-
-        return {
-            "model": decode_value("string", model_regs),
-            "serial_number": decode_value("string", serial_regs),
-            "firmware_version": decode_value("string", fw_regs),
-            "rated_power": decode_value("uint32", rated_power_regs)
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/telemetry")
-async def get_telemetry(
-    metrics: Optional[List[str]] = Query(None, description="Metrics to return (e.g. active_power, voltage_ph1)")):
-    available_metrics = {
-        "active_power", "reactive_power", "voltage_ph1", "voltage_ph2", "voltage_ph3",
-        "current_ph1", "current_ph2", "current_ph3", "power_factor",
-        "frequency", "total_energy", "alarm_code"
-    }
-    if metrics:
-        metrics = set(metrics)
-        invalid = metrics - available_metrics
-        if invalid:
-            raise HTTPException(status_code=400, detail=f"Invalid metrics: {invalid}")
-    else:
-        metrics = available_metrics
-
     result = {}
     try:
-        for m in metrics:
-            address, count, dtype = REGISTERS[m]
-            regs = await read_register(address, count)
-            val = decode_value(dtype, regs)
-            # Some scaling
-            if m == "total_energy":
-                val = val / 100  # Wh to kWh
-            elif m == "frequency":
-                val = val / 100  # Hz
-            elif m.startswith("voltage") or m.startswith("current") or m in ("active_power", "reactive_power", "power_factor"):
-                val = val / 100
-            result[m] = val
-        return result
+        for field, (address, count, rtype) in DEVICE_REGISTERS.items():
+            regs = await modbus_read(address, count)
+            result[field] = decode_value(rtype, regs)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to read device info: {str(e)}")
+    return result
 
-@app.put("/control")
-async def put_control(payload: ControlPayload):
-    """
-    Payload example:
-    {
-        "registers": {
-            "42006": 1000,              # Write value 1000 to register 42006
-            "42010": [0, 1, 2, 3]       # Write values to registers 42010-42013
-        }
-    }
-    """
+@app.get("/telemetry", response_class=JSONResponse)
+async def get_telemetry(
+    metrics: Optional[List[str]] = Query(None, description="Comma-separated list of metrics to include (e.g., active_power,voltages)")
+):
+    result = {}
+    targets = TELEMETRY_REGISTERS
+    if metrics:
+        targets = {k: v for k, v in TELEMETRY_REGISTERS.items() if k in metrics}
+        if not targets:
+            raise HTTPException(status_code=400, detail="No valid metrics specified.")
     try:
-        for reg_addr_str, value in payload.registers.items():
-            reg_addr = int(reg_addr_str)
-            if isinstance(value, list):
-                await write_register(reg_addr, value)
-            else:
-                await write_register(reg_addr, [value])
-        return {"status": "OK"}
+        for field, (address, count, rtype) in targets.items():
+            regs = await modbus_read(address, count)
+            result[field] = decode_value(rtype, regs)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to read telemetry: {str(e)}")
+    return result
 
-# --- Graceful Shutdown ---
+@app.put("/control", response_model=ControlResponse)
+async def put_control(cmd: ControlRequest):
+    try:
+        for reg in cmd.registers:
+            address = reg["address"]
+            values = reg["values"]
+            if not isinstance(values, list):
+                values = [values]
+            await modbus_write(address, values)
+        return ControlResponse(success=True, details="All commands executed successfully.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Control operation failed: {str(e)}")
+
+# ----------- Modbus Client Management -----------
+
+async def setup_modbus_client():
+    global modbus_client, modbus_protocol
+    if MODBUS_MODE == "tcp":
+        _, modbus_client = await AsyncModbusTCPClient(
+            host=MODBUS_TCP_HOST, 
+            port=MODBUS_TCP_PORT,
+            timeout=MODBUS_TIMEOUT
+        )
+    elif MODBUS_MODE == "rtu":
+        _, modbus_client = await AsyncModbusSerialClient(
+            method="rtu",
+            port=MODBUS_RTU_PORT,
+            baudrate=MODBUS_RTU_BAUDRATE,
+            parity=MODBUS_RTU_PARITY,
+            stopbits=MODBUS_RTU_STOPBITS,
+            bytesize=MODBUS_RTU_BYTESIZE,
+            timeout=MODBUS_TIMEOUT
+        )
+    else:
+        raise ValueError("Unsupported MODBUS_MODE. Use 'tcp' or 'rtu'.")
+
+@app.on_event("startup")
+async def on_startup():
+    await setup_modbus_client()
+
 @app.on_event("shutdown")
-async def shutdown_event():
-    await ModbusClient.close_clients()
+async def on_shutdown():
+    if modbus_client:
+        await modbus_client.close()
+
+# ----------- Uvicorn Entrypoint -----------
+
+def main():
+    uvicorn.run("main:app", host=SERVER_HOST, port=SERVER_PORT, reload=False, access_log=False)
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host=SERVER_HOST, port=SERVER_PORT)
+    main()
