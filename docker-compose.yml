@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  # Huawei inverter simulator for testing
+  simulator:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    command: python iot_driver_copilot/huawei_sun_2000_solar_inverter/simulator.py
+    ports:
+      - "5020:5020"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s = socket.socket(); s.connect(('localhost', 5020)); s.close()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Main exporter application
+  exporter:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      # Override only the Modbus host to use simulator
+      - SUN2000_MODBUS_HOST=simulator
+    depends_on:
+      simulator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8080/health', timeout=10)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Note: Using InfluxDB Cloud instead of local instance
+  # Configuration is loaded from .env file
