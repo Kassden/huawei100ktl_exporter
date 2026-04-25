@@ -5,4 +5,7 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
-
+DATABASE_INDEX_AND_ANALYSIS.md
+SPECIFICATION_COMPARISON_ANALYSIS.md
+Solar Inverter Modbus Interface Definitions.txt
+V3_TELEMETRY_UPDATE_SUMMARY.md
