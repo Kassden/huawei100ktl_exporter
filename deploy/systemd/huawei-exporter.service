@@ -1,0 +1,21 @@
+[Unit]
+Description=Huawei SUN2000 Exporter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=huawei-exporter
+Group=huawei-exporter
+WorkingDirectory=/opt/huawei100ktl_exporter
+EnvironmentFile=/etc/huawei-exporter.env
+ExecStart=/opt/huawei100ktl_exporter/.venv/bin/python /opt/huawei100ktl_exporter/main.py
+Restart=always
+RestartSec=5
+TimeoutStartSec=30
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
