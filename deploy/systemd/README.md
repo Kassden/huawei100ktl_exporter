@@ -8,6 +8,7 @@ This folder contains a minimal `systemd` deployment bundle for running the expor
 - `huawei-exporter.env.example`: environment file example loaded by `systemd`
 - `install-systemd.sh`: root-run installer for the common `/opt` layout
 - `verify-local.sh`: quick local API verification helper
+- `preflight-edge-check.sh`: checks env, network reachability, service state, and local API
 
 ## Assumed install layout
 
@@ -25,6 +26,7 @@ On the edge device, from the repo root:
 sudo bash deploy/systemd/install-systemd.sh
 sudoedit /etc/huawei-exporter.env
 sudo systemctl restart huawei-exporter.service
+deploy/systemd/preflight-edge-check.sh
 deploy/systemd/verify-local.sh
 ```
 
@@ -70,4 +72,5 @@ The installer will:
 
 Or use:
 
+- `deploy/systemd/preflight-edge-check.sh`
 - `deploy/systemd/verify-local.sh`
