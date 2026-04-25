@@ -47,7 +47,30 @@ curl http://localhost:8080/health
 curl http://localhost:8080/telemetry
 ```
 
-### Production Deployment on Raspberry Pi
+### Production Deployment On Raspberry Pi Or Edge Linux Device
+
+`systemd` is the recommended path for the edge device because this exporter is a single Python process and does not need Docker for normal operation.
+
+#### Recommended `systemd` path
+
+1. Copy the repo to the edge device.
+2. Run:
+```bash
+sudo bash deploy/systemd/install-systemd.sh
+```
+3. Edit the environment file:
+```bash
+sudoedit /etc/huawei-exporter.env
+```
+4. Restart and verify:
+```bash
+sudo systemctl restart huawei-exporter.service
+deploy/systemd/verify-local.sh
+```
+
+See [deploy/systemd/README.md](./deploy/systemd/README.md) for the full flow.
+
+#### Docker path
 
 1. Copy `.env.example` to `.env` and configure:
 ```bash
@@ -106,16 +129,20 @@ python main.py
 | `BATCH_SIZE` | `10` | Batch size for uploads |
 | `RETRY_ATTEMPTS` | `3` | Number of retry attempts |
 | `RETRY_DELAY` | `5` | Delay between retries (seconds) |
+| `EXPORTER_ENABLE_CONTROL` | `false` | Enables remote control writes when explicitly required |
+| `EXPORTER_STALE_AFTER_SECONDS` | `180` | Freshness threshold used by readiness checks |
 
 ## API Endpoints
 
 ### Core Endpoints
 
+- `GET /live` - Process liveness check
+- `GET /ready` - Ingestion readiness check
 - `GET /health` - Service health check
 - `GET /config` - Current configuration (sensitive data redacted)
 - `GET /device` - Device information (model, serial, firmware, etc.)
 - `GET /telemetry` - Real-time telemetry data
-- `PUT /control` - Send control commands to inverter
+- `PUT /control` - Send control commands to inverter, disabled by default in production
 
 ### Data Collector Management
 

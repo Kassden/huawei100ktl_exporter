@@ -6,6 +6,8 @@ This folder contains a minimal `systemd` deployment bundle for running the expor
 
 - `huawei-exporter.service`: service unit
 - `huawei-exporter.env.example`: environment file example loaded by `systemd`
+- `install-systemd.sh`: root-run installer for the common `/opt` layout
+- `verify-local.sh`: quick local API verification helper
 
 ## Assumed install layout
 
@@ -15,7 +17,27 @@ This folder contains a minimal `systemd` deployment bundle for running the expor
 
 Adjust the paths in the unit file if your deployment layout differs.
 
-## Suggested install steps
+## Fast path install
+
+On the edge device, from the repo root:
+
+```bash
+sudo bash deploy/systemd/install-systemd.sh
+sudoedit /etc/huawei-exporter.env
+sudo systemctl restart huawei-exporter.service
+deploy/systemd/verify-local.sh
+```
+
+The installer will:
+
+- create the `huawei-exporter` system user if missing
+- copy the repo into `/opt/huawei100ktl_exporter`
+- create a Python virtualenv
+- install `requirements.txt`
+- install `/etc/huawei-exporter.env` if it does not exist
+- install and start the `systemd` unit
+
+## Manual install steps
 
 1. Copy the exporter repo to `/opt/huawei100ktl_exporter`.
 2. Create a dedicated system user:
@@ -35,6 +57,8 @@ Adjust the paths in the unit file if your deployment layout differs.
   `sudo journalctl -u huawei-exporter.service -f`
 - restart:
   `sudo systemctl restart huawei-exporter.service`
+- disable:
+  `sudo systemctl disable --now huawei-exporter.service`
 
 ## Commissioning checks
 
@@ -44,3 +68,6 @@ Adjust the paths in the unit file if your deployment layout differs.
 - `curl http://127.0.0.1:8080/collector/status`
 - `curl http://127.0.0.1:8080/telemetry`
 
+Or use:
+
+- `deploy/systemd/verify-local.sh`
