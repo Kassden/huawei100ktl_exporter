@@ -2,6 +2,7 @@
 .env
 .warp
 __pycache__/
+.venv/
 *.pyc
 *.pyo
 *.pyd

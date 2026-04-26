@@ -24,7 +24,7 @@ A comprehensive data exporter for Huawei SUN2000 solar inverters that collects t
 
 ## Quick Start
 
-### Using Docker Compose (Recommended for Testing)
+### Using Docker Compose
 
 1. Clone the repository:
 ```bash
@@ -89,21 +89,24 @@ docker run -d --name huawei-exporter \
 
 ### Local Development
 
+For local testing without Docker, use the simulator path documented in [docs/local-simulator-cloud-test.md](./docs/local-simulator-cloud-test.md).
+
 1. Install dependencies:
 ```bash
-pip install -r requirements.txt
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
 ```
 
 2. Set environment variables or create `.env` file
 
 3. Run the simulator (in separate terminal):
 ```bash
-python iot_driver_copilot/huawei_sun_2000_solar_inverter/simulator.py
+.venv/bin/python iot_driver_copilot/huawei_sun_2000_solar_inverter/simulator.py
 ```
 
 4. Run the exporter:
 ```bash
-python main.py
+.venv/bin/python main.py
 ```
 
 ## Configuration
