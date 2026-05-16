@@ -20,7 +20,22 @@ def main():
     """Main application entry point"""
     logger.info("Starting Huawei SUN2000 Solar Inverter Exporter")
     logger.info(f"Configuration loaded:")
-    logger.info(f"  Modbus: {config.modbus.host}:{config.modbus.port}")
+    if config.modbus.transport == "rtu":
+        logger.info(
+            "  Modbus: rtu %s %s/%s/%s/%s",
+            config.modbus.serial_port,
+            config.modbus.baudrate,
+            config.modbus.bytesize,
+            config.modbus.parity,
+            config.modbus.stopbits,
+        )
+    else:
+        logger.info(
+            "  Modbus: tcp %s:%s (unit_id=%s)",
+            config.modbus.host,
+            config.modbus.port,
+            config.modbus.unit_id,
+        )
     logger.info(f"  HTTP Server: {config.http.host}:{config.http.port}")
     logger.info(f"  InfluxDB: {config.influxdb.url} (org: {config.influxdb.org})")
     logger.info(f"  Collection Interval: {config.exporter.collection_interval}s")

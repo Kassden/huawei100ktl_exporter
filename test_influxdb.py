@@ -44,21 +44,21 @@ async def test_influxdb_connection():
             device_id=config.exporter.device_id,
             site_id=config.exporter.site_id,
             measurements={
-                "active_power": 25000.0,  # 25kW
-                "reactive_power": 1500.0,  # 1.5kVAR
-                "voltage_L1": 230.5,      # 230.5V
-                "voltage_L2": 229.8,      # 229.8V  
-                "voltage_L3": 231.2,      # 231.2V
-                "current_L1": 36.2,       # 36.2A
-                "current_L2": 35.8,       # 35.8A
-                "current_L3": 36.5,       # 36.5A
-                "power_factor": 0.95,     # 95%
-                "frequency": 50.0,        # 50Hz
-                "total_energy": 1234567,  # 1.2MWh total
-                "alarm_codes": 0          # No alarms
+                "active_power": 25.0,                       # 25.0 kW
+                "reactive_power": 1.5,                     # 1.5 kVar
+                "phase_A_voltage": 230.5,                  # 230.5 V
+                "phase_B_voltage": 229.8,                  # 229.8 V
+                "phase_C_voltage": 231.2,                  # 231.2 V
+                "phase_A_current": 36.2,                   # 36.2 A
+                "phase_B_current": 35.8,                   # 35.8 A
+                "phase_C_current": 36.5,                   # 36.5 A
+                "power_factor": 0.95,                      # 0.95
+                "grid_frequency": 50.0,                    # 50.0 Hz
+                "cumulative_generated_electricity": 123456.78,  # kWh
+                "highest_priority_alarm_code": 0           # No alarms
             },
             device_info={
-                "model": "SUN2000-100KTL-TEST",
+                "model": "SUN2000-100KTL-M2",
                 "serial_number": "TEST123456789",
                 "firmware_version": "V100R001C00SPC138"
             }
@@ -71,7 +71,7 @@ async def test_influxdb_connection():
             print("✅ Successfully wrote test data to InfluxDB!")
             print(f"   Device ID: {config.exporter.device_id}")
             print(f"   Site ID: {config.exporter.site_id}")
-            print("   Sample metrics: active_power=25kW, voltage_L1=230.5V")
+            print("   Sample metrics: active_power=25.0kW, phase_A_voltage=230.5V")
         else:
             print("❌ Failed to write test data")
             return False

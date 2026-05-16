@@ -10,7 +10,7 @@ from influxdb_writer import TelemetryPoint, influxdb_writer
 
 # Import the modbus client classes
 from modbus_client import (
-    ModbusTCPClient, TELEMETRY_MAP, DEVICE_MAP,
+    HuaweiModbusClient, TELEMETRY_MAP, DEVICE_MAP,
     parse_int32_registers, parse_uint32_registers, parse_uint16_register, 
     parse_int16_register, parse_epoch_seconds_registers, parse_string_registers
 )
@@ -23,11 +23,17 @@ class DataCollector:
     def __init__(self):
         self.scheduler = AsyncIOScheduler()
         self.data_buffer: deque = deque(maxlen=1000)  # Buffer for collected data
-        self.modbus_client = ModbusTCPClient(
+        self.modbus_client = HuaweiModbusClient(
             config.modbus.host,
             config.modbus.port,
             config.modbus.unit_id,
-            config.modbus.timeout
+            config.modbus.timeout,
+            transport=config.modbus.transport,
+            serial_port=config.modbus.serial_port,
+            baudrate=config.modbus.baudrate,
+            parity=config.modbus.parity,
+            bytesize=config.modbus.bytesize,
+            stopbits=config.modbus.stopbits,
         )
         self.device_info: Optional[Dict[str, Any]] = None
         self.is_running = False

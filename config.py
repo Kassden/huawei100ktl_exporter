@@ -13,6 +13,14 @@ def env_bool(name: str, default: bool = False) -> bool:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
+def default_modbus_unit_id() -> int:
+    configured = os.environ.get("SUN2000_MODBUS_UNIT_ID")
+    if configured is not None:
+        return int(configured)
+
+    transport = os.environ.get("SUN2000_MODBUS_TRANSPORT", "tcp").strip().lower()
+    return 1 if transport == "rtu" else 0
+
 class InfluxDBConfig(BaseModel):
     """InfluxDB configuration"""
     url: str = Field(default_factory=lambda: os.environ.get("INFLUXDB_URL", "http://localhost:8086"))
@@ -24,10 +32,16 @@ class InfluxDBConfig(BaseModel):
 
 class ModbusConfig(BaseModel):
     """Modbus configuration"""
+    transport: str = Field(default_factory=lambda: os.environ.get("SUN2000_MODBUS_TRANSPORT", "tcp").strip().lower())
     host: str = Field(default_factory=lambda: os.environ.get("SUN2000_MODBUS_HOST", "127.0.0.1"))
     port: int = Field(default_factory=lambda: int(os.environ.get("SUN2000_MODBUS_PORT", "502")))
-    unit_id: int = Field(default_factory=lambda: int(os.environ.get("SUN2000_MODBUS_UNIT_ID", "1")))
+    unit_id: int = Field(default_factory=default_modbus_unit_id)
     timeout: float = Field(default_factory=lambda: float(os.environ.get("SUN2000_MODBUS_TIMEOUT", "5.0")))
+    serial_port: Optional[str] = Field(default_factory=lambda: os.environ.get("SUN2000_SERIAL_PORT"))
+    baudrate: int = Field(default_factory=lambda: int(os.environ.get("SUN2000_SERIAL_BAUDRATE", "9600")))
+    parity: str = Field(default_factory=lambda: os.environ.get("SUN2000_SERIAL_PARITY", "N").strip().upper())
+    bytesize: int = Field(default_factory=lambda: int(os.environ.get("SUN2000_SERIAL_BYTESIZE", "8")))
+    stopbits: int = Field(default_factory=lambda: int(os.environ.get("SUN2000_SERIAL_STOPBITS", "1")))
 
 class ExporterConfig(BaseModel):
     """Main exporter configuration"""

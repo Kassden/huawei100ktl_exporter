@@ -67,13 +67,39 @@ else
 fi
 
 print_section "Configured Targets"
-echo "Modbus target: ${SUN2000_MODBUS_HOST}:${SUN2000_MODBUS_PORT}"
+echo "Modbus transport: ${SUN2000_MODBUS_TRANSPORT:-tcp}"
+if [[ "${SUN2000_MODBUS_TRANSPORT:-tcp}" == "rtu" ]]; then
+  echo "Modbus serial port: ${SUN2000_SERIAL_PORT:-<unset>}"
+  echo "Serial settings: ${SUN2000_SERIAL_BAUDRATE:-9600}/${SUN2000_SERIAL_BYTESIZE:-8}/${SUN2000_SERIAL_PARITY:-N}/${SUN2000_SERIAL_STOPBITS:-1}"
+  echo "Modbus unit ID: ${SUN2000_MODBUS_UNIT_ID:-1}"
+else
+  echo "Modbus target: ${SUN2000_MODBUS_HOST}:${SUN2000_MODBUS_PORT}"
+  echo "Modbus unit ID: ${SUN2000_MODBUS_UNIT_ID:-0}"
+fi
 echo "Influx URL: ${INFLUXDB_URL}"
 echo "Device ID: ${DEVICE_ID}"
 echo "Site ID: ${SITE_ID}"
 
 print_section "Network Reachability"
-check_tcp "${SUN2000_MODBUS_HOST}" "${SUN2000_MODBUS_PORT}"
+if [[ "${SUN2000_MODBUS_TRANSPORT:-tcp}" == "rtu" ]]; then
+  python3 - "${SUN2000_SERIAL_PORT:-}" <<'PY'
+import os
+import stat
+import sys
+
+serial_port = sys.argv[1]
+if not serial_port:
+    raise SystemExit("SUN2000_SERIAL_PORT is not set")
+
+st = os.stat(serial_port)
+if not stat.S_ISCHR(st.st_mode):
+    raise SystemExit(f"Configured RTU path is not a character device: {serial_port}")
+
+print(f"Serial device OK: {serial_port}")
+PY
+else
+  check_tcp "${SUN2000_MODBUS_HOST}" "${SUN2000_MODBUS_PORT}"
+fi
 
 INFLUX_HOST="$(python3 - <<'PY'
 from urllib.parse import urlparse
@@ -110,4 +136,3 @@ check_http_json "/live"
 check_http_json "/ready"
 check_http_json "/health"
 check_http_json "/collector/status"
-

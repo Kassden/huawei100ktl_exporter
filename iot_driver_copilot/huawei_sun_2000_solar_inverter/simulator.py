@@ -31,6 +31,9 @@ def uint32_to_registers(value: int) -> list[int]:
     packed = struct.pack(">I", int(value) & 0xFFFFFFFF)
     return [int.from_bytes(packed[:2], "big"), int.from_bytes(packed[2:], "big")]
 
+def zero_registers(count: int) -> list[int]:
+    return [0 for _ in range(count)]
+
 
 class SolarState:
     def __init__(self) -> None:
@@ -95,7 +98,6 @@ class SolarState:
         prev_day_kwh_x100 = 40000
         prev_month_kwh_x100 = 120000
         prev_year_kwh_x100 = 1_000_000
-        total_dc_input_power_kw_x1000 = int(active_power_w * 1.05)
         efficiency_x100 = 9850
         cabinet_temp_x10 = int((35 + random.uniform(-2, 5)) * 10)
 
@@ -104,27 +106,29 @@ class SolarState:
             32008: [0],
             32009: [0],
             32010: [0],
-            32064: int32_to_registers(grid_l1_l2),
-            32066: int32_to_registers(grid_l2_l3),
-            32068: int32_to_registers(grid_l3_l1),
-            32070: int32_to_registers(phase_a_v),
-            32072: int32_to_registers(phase_b_v),
-            32074: int32_to_registers(phase_c_v),
-            32076: int32_to_registers(phase_a_i),
-            32078: int32_to_registers(phase_b_i),
-            32080: int32_to_registers(phase_c_i),
-            32082: int32_to_registers(active_power_w),
-            32084: int32_to_registers(reactive_power_var),
-            32086: [power_factor, 0],
-            32088: [frequency, 0],
+            32064: int32_to_registers(int(active_power_w * 1.05)),
+            32066: [grid_l1_l2],
+            32067: [grid_l2_l3],
+            32068: [grid_l3_l1],
+            32069: [phase_a_v],
+            32070: [phase_b_v],
+            32071: [phase_c_v],
+            32072: int32_to_registers(phase_a_i),
+            32074: int32_to_registers(phase_b_i),
+            32076: int32_to_registers(phase_c_i),
+            32078: int32_to_registers(active_power_w),
+            32080: int32_to_registers(active_power_w),
+            32082: int32_to_registers(reactive_power_var),
+            32084: [power_factor],
+            32085: [frequency],
+            32086: [efficiency_x100],
+            32087: [cabinet_temp_x10],
+            32088: [2500],
             32089: [self.device_state],
             32090: [0],
             32091: uint32_to_registers(self.startup_time),
             32093: [0, 0],
             32106: uint32_to_registers(total_energy_kwh_x100),
-            32108: uint32_to_registers(total_dc_input_power_kw_x1000),
-            32110: [efficiency_x100, 0],
-            32112: [cabinet_temp_x10, 0],
             32114: uint32_to_registers(daily_energy_kwh_x100),
             32116: uint32_to_registers(monthly_energy_kwh_x100),
             32118: uint32_to_registers(yearly_energy_kwh_x100),
@@ -139,22 +143,87 @@ class SolarState:
         }
 
         pv_base_voltage_x10 = int((480 + random.uniform(-20, 20)) * 10) if active_power_w else 0
-        pv_base_current_x100 = int((active_power_w / 16 / 480) * 100) if active_power_w else 0
-        for string_idx in range(16):
-            voltage_addr = 32016 + string_idx * 4
-            current_addr = 32018 + string_idx * 4
+        pv_base_current_x100 = int((active_power_w / 20 / 480) * 100) if active_power_w else 0
+        for string_idx in range(20):
+            voltage_addr = 32016 + string_idx * 2
+            current_addr = voltage_addr + 1
             pv_v = int(pv_base_voltage_x10 * (0.95 + random.random() * 0.1)) if active_power_w else 0
             pv_i = int(pv_base_current_x100 * (0.90 + random.random() * 0.2)) if active_power_w else 0
-            values[voltage_addr] = [pv_v, 0]
-            values[current_addr] = [pv_i, 0]
-
-        values[32142] = values.get(32142, [0, 0])
-        values[32144] = values.get(32144, [0, 0])
+            values[voltage_addr] = [pv_v]
+            values[current_addr] = [pv_i]
         return values
 
 
 def build_device() -> SimDevice:
     blocks: list[SimData] = []
+    writable_defaults = {
+        40000: uint32_to_registers(int(time.time())),
+        40037: [0],
+        40038: [0],
+        40120: [1000],
+        40122: [1000],
+        40123: [0],
+        40124: [0],
+        40125: [1000],
+        40126: uint32_to_registers(100_000),
+        40128: [0],
+        40129: int32_to_registers(0),
+        40133: zero_registers(21),
+        40154: zero_registers(21),
+        40175: zero_registers(21),
+        40196: [0],
+        40197: [1000],
+        40198: [0],
+        40199: [1000],
+        40200: [0],
+        40201: [0],
+        40205: [0],
+        40354: zero_registers(21),
+        40375: [900],
+        40376: [0],
+        42000: [0],
+        42001: [0],
+        42002: [400],
+        42003: [50],
+        42014: [1],
+        42015: uint32_to_registers(1000),
+        42017: uint32_to_registers(1000),
+        42019: uint32_to_registers(0),
+        42021: uint32_to_registers(110_000),
+        42023: uint32_to_registers(100_000),
+        42025: uint32_to_registers(110_000),
+        42027: uint32_to_registers(100_000),
+        42029: [0],
+        42030: uint32_to_registers(0),
+        42032: [0],
+        42037: [0],
+        42040: [0],
+        42041: [0],
+        42042: [0],
+        42043: [0],
+        42046: [0],
+        42047: [0],
+        42048: [0],
+        42049: [0],
+        42050: [0],
+        42051: [0],
+        42052: [0],
+        42053: [0],
+        42054: [0],
+        42055: [0],
+        42061: [1],
+        42062: [0],
+        42063: [0],
+        42064: [1],
+        42065: [0],
+        42066: [0],
+        42067: [0],
+        42069: [0],
+        42070: [0],
+        42072: [60],
+        42073: [0],
+        42074: [0],
+    }
 
     def add_regs(address: int, regs: list[int]) -> None:
         blocks.append(
@@ -174,20 +243,22 @@ def build_device() -> SimDevice:
             )
         )
 
-    add_string(30000, "SUN2000-100KTL", 15)
+    add_string(30000, "SUN2000-100KTL-M2", 15)
     add_string(30015, "TEST123456789", 10)
     add_string(30025, "PN-100KTL", 10)
     add_string(30035, "V100R001C00SPC138", 15)
     add_string(30050, "APPV100R001", 15)
     add_regs(30068, uint32_to_registers(3))
-    add_regs(30070, [100])
-    add_regs(30071, [16])
-    add_regs(30072, [8])
+    add_regs(30070, [150])
+    add_regs(30071, [20])
+    add_regs(30072, [10])
     add_regs(30073, uint32_to_registers(100_000))
     add_regs(30075, uint32_to_registers(110_000))
     add_regs(30077, uint32_to_registers(110_000))
     add_regs(30079, int32_to_registers(50_000))
     add_regs(30081, int32_to_registers(-50_000))
+    for address, regs in sorted(writable_defaults.items()):
+        add_regs(address, regs)
 
     state = SolarState()
     dynamic_registers = state.snapshot()
@@ -198,7 +269,7 @@ def build_device() -> SimDevice:
     identity.VendorName = "Huawei"
     identity.ProductCode = "SUN2000"
     identity.ProductName = "Huawei Inverter Simulator"
-    identity.ModelName = "SUN2000-100KTL"
+    identity.ModelName = "SUN2000-100KTL-M2"
     identity.MajorMinorRevision = "1.0"
 
     async def action(function_code, start_address, address, count, current_registers, set_values):
@@ -212,7 +283,7 @@ def build_device() -> SimDevice:
                 current_registers[idx] = value
         return None
 
-    return SimDevice(id=1, simdata=blocks, identity=identity, action=action)
+    return SimDevice(id=0, simdata=blocks, identity=identity, action=action)
 
 
 async def main() -> None:

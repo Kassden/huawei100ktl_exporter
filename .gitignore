@@ -1,5 +1,6 @@
 .DS_Store
 .env
+.env.pi4b.local
 .warp
 __pycache__/
 .venv/

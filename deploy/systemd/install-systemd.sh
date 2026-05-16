@@ -5,6 +5,7 @@ SERVICE_NAME="${SERVICE_NAME:-huawei-exporter}"
 SERVICE_USER="${SERVICE_USER:-huawei-exporter}"
 APP_DIR="${APP_DIR:-/opt/huawei100ktl_exporter}"
 ENV_FILE="${ENV_FILE:-/etc/huawei-exporter.env}"
+STAGED_ENV_FILE="${STAGED_ENV_FILE:-${APP_DIR}/.env.pi4b.local}"
 SYSTEMD_DIR="${SYSTEMD_DIR:-/etc/systemd/system}"
 UNIT_PATH="${SYSTEMD_DIR}/${SERVICE_NAME}.service"
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -54,6 +55,12 @@ install_env_file() {
     return
   fi
 
+  if [[ -f "${STAGED_ENV_FILE}" ]]; then
+    install -m 600 "${STAGED_ENV_FILE}" "${ENV_FILE}"
+    echo "Created ${ENV_FILE} from staged local env ${STAGED_ENV_FILE}."
+    return
+  fi
+
   install -m 600 "${APP_DIR}/deploy/systemd/huawei-exporter.env.example" "${ENV_FILE}"
   echo "Created ${ENV_FILE} from example. Edit it before relying on production data flow."
 }
@@ -77,12 +84,19 @@ enable_service() {
 }
 
 print_next_steps() {
+  local env_step
+  if [[ -f "${STAGED_ENV_FILE}" ]]; then
+    env_step="1. Review ${ENV_FILE} copied from ${STAGED_ENV_FILE}."
+  else
+    env_step="1. Edit ${ENV_FILE} with the real inverter and InfluxDB values."
+  fi
+
   cat <<EOF
 
 Install complete.
 
 Next steps:
-1. Edit ${ENV_FILE} with the real inverter and InfluxDB values.
+${env_step}
 2. Restart the service:
    sudo systemctl restart ${SERVICE_NAME}.service
 3. Check status:
