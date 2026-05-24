@@ -78,8 +78,13 @@ class DataCollector:
                 replace_existing=True,
             )
             
-            # Start scheduled batch upload (every 5 collections or when buffer is full)
-            upload_interval = min(config.exporter.collection_interval * 5, 300)  # Max 5 minutes
+            # Start scheduled batch upload. Sites can opt into faster cloud
+            # freshness without changing the Modbus polling cadence.
+            upload_interval = (
+                config.exporter.upload_interval
+                if config.exporter.upload_interval is not None
+                else min(config.exporter.collection_interval * 5, 300)
+            )
             self.scheduler.add_job(
                 self._upload_batch,
                 trigger=IntervalTrigger(seconds=upload_interval),
@@ -306,6 +311,11 @@ class DataCollector:
             "buffer_max_size": self.data_buffer.maxlen,
             "dropped_points": self.dropped_points,
             "collection_interval": config.exporter.collection_interval,
+            "upload_interval": (
+                config.exporter.upload_interval
+                if config.exporter.upload_interval is not None
+                else min(config.exporter.collection_interval * 5, 300)
+            ),
             "batch_size": config.exporter.batch_size,
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "last_successful_collection_at": self.last_successful_collection_at.isoformat() if self.last_successful_collection_at else None,

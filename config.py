@@ -13,6 +13,15 @@ def env_bool(name: str, default: bool = False) -> bool:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
+def env_optional_int(name: str) -> Optional[int]:
+    value = os.environ.get(name)
+    if value is None or value.strip() == "":
+        return None
+    parsed = int(value)
+    if parsed <= 0:
+        raise ValueError(f"{name} must be greater than 0")
+    return parsed
+
 def default_modbus_unit_id() -> int:
     configured = os.environ.get("SUN2000_MODBUS_UNIT_ID")
     if configured is not None:
@@ -48,6 +57,7 @@ class ExporterConfig(BaseModel):
     device_id: str = Field(default_factory=lambda: os.environ.get("DEVICE_ID", "inverter_001"))
     site_id: str = Field(default_factory=lambda: os.environ.get("SITE_ID", "site_001"))
     collection_interval: int = Field(default_factory=lambda: int(os.environ.get("COLLECTION_INTERVAL", "60")))  # seconds
+    upload_interval: Optional[int] = Field(default_factory=lambda: env_optional_int("UPLOAD_INTERVAL"))
     batch_size: int = Field(default_factory=lambda: int(os.environ.get("BATCH_SIZE", "10")))
     retry_attempts: int = Field(default_factory=lambda: int(os.environ.get("RETRY_ATTEMPTS", "3")))
     retry_delay: int = Field(default_factory=lambda: int(os.environ.get("RETRY_DELAY", "5")))  # seconds
