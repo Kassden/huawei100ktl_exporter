@@ -270,6 +270,7 @@ SUN2000_SERIAL_STOPBITS=1
 | `DEVICE_ID` | `inverter_001` | Exported device tag |
 | `SITE_ID` | `site_001` | Exported site tag |
 | `COLLECTION_INTERVAL` | `60` | Telemetry collection interval in seconds |
+| `UPLOAD_INTERVAL` | unset | InfluxDB upload interval in seconds; defaults to every five collections, capped at 300 seconds |
 | `BATCH_SIZE` | `10` | Upload batch size |
 | `RETRY_ATTEMPTS` | `3` | Upload retry count |
 | `RETRY_DELAY` | `5` | Retry delay in seconds |
