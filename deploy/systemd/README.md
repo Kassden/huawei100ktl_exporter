@@ -16,6 +16,7 @@ Use this document only for the service layout and install flow.
 - `huawei-exporter.service`
 - `huawei-exporter.env.example`
 - `install-systemd.sh`
+- `push-to-pi.sh`
 - `preflight-edge-check.sh`
 - `verify-local.sh`
 
@@ -47,6 +48,36 @@ If you want to prepare the RTU and Influx values on your Mac before copying to t
 4. Run `sudo bash deploy/systemd/install-systemd.sh` on the Pi
 
 On first install, the installer will prefer `.env.pi4b.local` and copy it to `/etc/huawei-exporter.env`. If `/etc/huawei-exporter.env` already exists, it leaves the existing file in place.
+
+## Automatic local-to-Pi deploy
+
+From your Mac, run:
+
+```bash
+bash deploy/systemd/push-to-pi.sh
+```
+
+By default it assumes:
+
+- `PI_USER=sunrya888`
+- `PI_HOST=100.104.99.55`
+- remote staging directory: `/home/sunrya888/huawei100ktl_exporter`
+- installed app directory: `/opt/huawei100ktl_exporter`
+
+What it does:
+
+1. `rsync`s the local repo to the Pi staging directory
+2. runs `sudo bash deploy/systemd/install-systemd.sh` on the Pi
+3. restarts `huawei-exporter.service`
+4. runs `verify-local.sh` on the Pi
+
+You can override the target at runtime:
+
+```bash
+PI_USER=myuser PI_HOST=pi4b.tailnet-name.ts.net bash deploy/systemd/push-to-pi.sh
+```
+
+Because `install-systemd.sh` preserves `/etc/huawei-exporter.env` once it already exists, repeated deploys update code and dependencies without overwriting the live InfluxDB or RTU settings.
 
 ## What the installer does
 
