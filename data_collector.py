@@ -6,7 +6,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from collections import deque
 from config import config
-from influxdb_writer import TelemetryPoint, influxdb_writer
+from influxdb_writer import AlarmEventPoint, TelemetryPoint, influxdb_writer
 
 # Import the modbus client classes
 from modbus_client import (
@@ -17,12 +17,26 @@ from modbus_client import (
 
 logger = logging.getLogger(__name__)
 
+ALARM_TRANSITION_FIELDS = [
+    "alarm_1",
+    "alarm_2",
+    "alarm_3",
+    "highest_priority_alarm_code",
+    "number_of_critical_alarms",
+    "number_of_major_alarms",
+    "number_of_minor_alarms",
+    "number_of_warning_alarms",
+    "inverter_state",
+    "device_state",
+]
+
 class DataCollector:
     """Collects telemetry data from solar inverter and batches it for InfluxDB"""
     
     def __init__(self):
         self.scheduler = AsyncIOScheduler()
         self.data_buffer: deque = deque(maxlen=1000)  # Buffer for collected data
+        self.alarm_event_buffer: deque = deque(maxlen=2000)
         self.modbus_client = HuaweiModbusClient(
             config.modbus.host,
             config.modbus.port,
@@ -45,6 +59,8 @@ class DataCollector:
         self.consecutive_collection_failures = 0
         self.consecutive_upload_failures = 0
         self.dropped_points = 0
+        self.dropped_alarm_events = 0
+        self.last_alarm_snapshot: Optional[Dict[str, Optional[float]]] = None
         
     async def start(self):
         """Start the data collector"""
@@ -224,10 +240,12 @@ class DataCollector:
         """Collect telemetry data and add to buffer"""
         try:
             telemetry = await self._collect_telemetry_data()
+            collected_at = datetime.now(timezone.utc)
+            alarm_events = self._build_alarm_events(telemetry, collected_at)
             
             # Create telemetry point
             point = TelemetryPoint(
-                timestamp=datetime.now(timezone.utc),
+                timestamp=collected_at,
                 device_id=config.exporter.device_id,
                 site_id=config.exporter.site_id,
                 measurements=telemetry,
@@ -239,6 +257,13 @@ class DataCollector:
                 self.dropped_points += 1
                 logger.error("Telemetry buffer full; dropping oldest point before appending new data")
             self.data_buffer.append(point)
+
+            for event in alarm_events:
+                if len(self.alarm_event_buffer) >= self.alarm_event_buffer.maxlen:
+                    self.dropped_alarm_events += 1
+                    logger.error("Alarm event buffer full; dropping oldest event before appending")
+                self.alarm_event_buffer.append(event)
+
             self.last_successful_collection_at = point.timestamp
             self.consecutive_collection_failures = 0
             logger.debug(f"Collected telemetry data, buffer size: {len(self.data_buffer)}")
@@ -254,27 +279,42 @@ class DataCollector:
     
     async def _upload_batch(self):
         """Upload batched data to InfluxDB"""
-        if not self.data_buffer:
+        if not self.data_buffer and not self.alarm_event_buffer:
             logger.debug("No data to upload")
             return True
             
         try:
-            # Get batch from buffer
-            batch = list(self.data_buffer)
-            
-            # Upload to InfluxDB
-            success = await influxdb_writer.write_points(batch)
-            
-            if success:
-                # Clear buffer only if upload was successful
+            telemetry_batch = list(self.data_buffer)
+            alarm_event_batch = list(self.alarm_event_buffer)
+
+            telemetry_success = True
+            alarm_events_success = True
+
+            if telemetry_batch:
+                telemetry_success = await influxdb_writer.write_points(telemetry_batch)
+            if alarm_event_batch:
+                alarm_events_success = await influxdb_writer.write_alarm_events(alarm_event_batch)
+
+            if telemetry_success and telemetry_batch:
                 self.data_buffer.clear()
+                logger.info(f"Successfully uploaded batch of {len(telemetry_batch)} data points")
+            elif telemetry_batch:
+                logger.error(f"Failed to upload batch of {len(telemetry_batch)} data points")
+
+            if alarm_events_success and alarm_event_batch:
+                self.alarm_event_buffer.clear()
+                logger.info(f"Successfully uploaded batch of {len(alarm_event_batch)} alarm events")
+            elif alarm_event_batch:
+                logger.error(f"Failed to upload batch of {len(alarm_event_batch)} alarm events")
+
+            success = telemetry_success and alarm_events_success
+            if success:
                 self.last_successful_upload_at = datetime.now(timezone.utc)
                 self.consecutive_upload_failures = 0
-                logger.info(f"Successfully uploaded batch of {len(batch)} data points")
             else:
                 self.last_failed_upload_at = datetime.now(timezone.utc)
                 self.consecutive_upload_failures += 1
-                logger.error(f"Failed to upload batch of {len(batch)} data points")
+
             return success
                 
         except Exception as e:
@@ -282,6 +322,78 @@ class DataCollector:
             self.consecutive_upload_failures += 1
             logger.error(f"Error uploading batch: {e}")
             return False
+
+    def _build_alarm_events(
+        self, telemetry: Dict[str, Any], timestamp: datetime
+    ) -> List[AlarmEventPoint]:
+        snapshot = {
+            field: self._to_float(telemetry.get(field))
+            for field in ALARM_TRANSITION_FIELDS
+        }
+
+        if self.last_alarm_snapshot is None:
+            self.last_alarm_snapshot = snapshot
+            return []
+
+        events: List[AlarmEventPoint] = []
+        severity = self._calculate_alarm_severity(snapshot)
+        alarm_code = int(snapshot.get("highest_priority_alarm_code") or 0)
+
+        for field in ALARM_TRANSITION_FIELDS:
+            previous_value = self.last_alarm_snapshot.get(field)
+            current_value = snapshot.get(field)
+            if previous_value == current_value:
+                continue
+
+            events.append(
+                AlarmEventPoint(
+                    timestamp=timestamp,
+                    device_id=config.exporter.device_id,
+                    site_id=config.exporter.site_id,
+                    event_type="state_transition"
+                    if field in {"inverter_state", "device_state"}
+                    else "alarm_transition",
+                    source_field=field,
+                    previous_value=previous_value,
+                    current_value=current_value,
+                    alarm_code=alarm_code,
+                    severity=severity,
+                )
+            )
+
+        self.last_alarm_snapshot = snapshot
+        return events
+
+    @staticmethod
+    def _to_float(value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return float(int(value))
+        if isinstance(value, (int, float)):
+            return float(value)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _calculate_alarm_severity(snapshot: Dict[str, Optional[float]]) -> str:
+        critical = int(snapshot.get("number_of_critical_alarms") or 0)
+        major = int(snapshot.get("number_of_major_alarms") or 0)
+        minor = int(snapshot.get("number_of_minor_alarms") or 0)
+        warning = int(snapshot.get("number_of_warning_alarms") or 0)
+        highest = int(snapshot.get("highest_priority_alarm_code") or 0)
+
+        if critical > 0:
+            return "critical"
+        if major > 0 or highest > 0:
+            return "major"
+        if minor > 0:
+            return "minor"
+        if warning > 0:
+            return "warning"
+        return "none"
 
     def is_collection_fresh(self) -> bool:
         if not self.last_successful_collection_at:
@@ -308,8 +420,10 @@ class DataCollector:
             "running": self.is_running,
             "ready": self.is_ready(),
             "buffer_size": len(self.data_buffer),
+            "alarm_event_buffer_size": len(self.alarm_event_buffer),
             "buffer_max_size": self.data_buffer.maxlen,
             "dropped_points": self.dropped_points,
+            "dropped_alarm_events": self.dropped_alarm_events,
             "collection_interval": config.exporter.collection_interval,
             "upload_interval": (
                 config.exporter.upload_interval

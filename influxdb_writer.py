@@ -19,6 +19,19 @@ class TelemetryPoint:
     measurements: Dict[str, Any]
     device_info: Optional[Dict[str, Any]] = None
 
+@dataclass
+class AlarmEventPoint:
+    """Represents an alarm or state transition event"""
+    timestamp: datetime
+    device_id: str
+    site_id: str
+    event_type: str
+    source_field: str
+    previous_value: Optional[float]
+    current_value: Optional[float]
+    alarm_code: int
+    severity: str
+
 class InfluxDBWriter:
     """Async InfluxDB client for writing solar inverter telemetry"""
     
@@ -92,6 +105,25 @@ class InfluxDBWriter:
                     point = point.field(key, str(value))
         
         return point
+
+    def _create_alarm_event_point(self, event: AlarmEventPoint) -> Point:
+        """Convert alarm event to an InfluxDB Point"""
+        point = (
+            Point(config.influxdb.alarm_events_measurement)
+            .tag("device_id", event.device_id)
+            .tag("site_id", event.site_id)
+            .tag("event_type", event.event_type)
+            .tag("source_field", event.source_field)
+            .tag("severity", event.severity)
+            .time(event.timestamp, WritePrecision.S)
+        )
+        point = point.field("alarm_code", float(event.alarm_code))
+        if event.previous_value is not None:
+            point = point.field("previous_value", float(event.previous_value))
+        if event.current_value is not None:
+            point = point.field("current_value", float(event.current_value))
+
+        return point
     
     async def write_points(self, telemetry_points: List[TelemetryPoint], retry_count: int = 0) -> bool:
         """Write multiple telemetry points to InfluxDB"""
@@ -130,6 +162,43 @@ class InfluxDBWriter:
     async def write_single_point(self, telemetry_point: TelemetryPoint) -> bool:
         """Write a single telemetry point to InfluxDB"""
         return await self.write_points([telemetry_point])
+
+    async def write_alarm_events(
+        self, alarm_events: List[AlarmEventPoint], retry_count: int = 0
+    ) -> bool:
+        """Write alarm transition events to InfluxDB"""
+        if not alarm_events:
+            return True
+
+        if not self.is_connected():
+            logger.warning("Not connected to InfluxDB, attempting to reconnect...")
+            if not await self.connect():
+                return False
+
+        try:
+            points = [self._create_alarm_event_point(event) for event in alarm_events]
+            self.write_api.write(
+                bucket=config.influxdb.bucket,
+                org=config.influxdb.org,
+                record=points,
+            )
+            logger.info(f"Successfully wrote {len(points)} alarm events to InfluxDB")
+            return True
+        except ApiException as e:
+            logger.error(f"InfluxDB API error while writing alarm events: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Error writing alarm events to InfluxDB: {e}")
+
+            if retry_count < config.exporter.retry_attempts:
+                logger.info(
+                    "Retrying alarm event write (attempt %s/%s)",
+                    retry_count + 1,
+                    config.exporter.retry_attempts,
+                )
+                await asyncio.sleep(config.exporter.retry_delay)
+                return await self.write_alarm_events(alarm_events, retry_count + 1)
+            return False
     
     async def health_check(self) -> Dict[str, Any]:
         """Check InfluxDB connection health"""

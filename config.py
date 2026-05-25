@@ -37,6 +37,9 @@ class InfluxDBConfig(BaseModel):
     org: str = Field(default_factory=lambda: os.environ.get("INFLUXDB_ORG", "solar"))
     bucket: str = Field(default_factory=lambda: os.environ.get("INFLUXDB_BUCKET", "inverters"))
     measurement: str = Field(default_factory=lambda: os.environ.get("INFLUXDB_MEASUREMENT", "huawei_sun2000"))
+    alarm_events_measurement: str = Field(
+        default_factory=lambda: os.environ.get("INFLUXDB_ALARM_EVENTS_MEASUREMENT", "alarm_events")
+    )
     timeout: int = Field(default_factory=lambda: int(os.environ.get("INFLUXDB_TIMEOUT", "30")))
 
 class ModbusConfig(BaseModel):
