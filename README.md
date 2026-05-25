@@ -4,6 +4,7 @@ RTU-first Huawei SUN2000 exporter for the `SUN2000-100KTL-M2`, with:
 
 - Modbus `RTU` and `TCP` support
 - InfluxDB batch upload
+- alarm/state transition event upload
 - HTTP health and telemetry endpoints
 - full device and telemetry readout
 - remote control plus validated remote settings writes
@@ -265,7 +266,8 @@ SUN2000_SERIAL_STOPBITS=1
 | `INFLUXDB_TOKEN` | empty | InfluxDB auth token |
 | `INFLUXDB_ORG` | `solar` | InfluxDB org |
 | `INFLUXDB_BUCKET` | `inverters` | InfluxDB bucket |
-| `INFLUXDB_MEASUREMENT` | `huawei_sun2000` | Influx measurement |
+| `INFLUXDB_MEASUREMENT` | `huawei_sun2000` | Influx telemetry measurement |
+| `INFLUXDB_ALARM_EVENTS_MEASUREMENT` | `alarm_events` | Influx alarm/state transition measurement |
 | `INFLUXDB_TIMEOUT` | `30` | Influx timeout in seconds |
 | `DEVICE_ID` | `inverter_001` | Exported device tag |
 | `SITE_ID` | `site_001` | Exported site tag |
@@ -296,6 +298,16 @@ SUN2000_SERIAL_STOPBITS=1
 | `/collector/start` | `POST` | Start collector |
 | `/collector/stop` | `POST` | Stop collector |
 | `/collector/upload` | `POST` | Force upload buffered points |
+
+### Alarm transition persistence model
+
+- Transition fields tracked each collection cycle:
+  - `alarm_1`, `alarm_2`, `alarm_3`
+  - `highest_priority_alarm_code`
+  - `number_of_critical_alarms`, `number_of_major_alarms`, `number_of_minor_alarms`, `number_of_warning_alarms`
+  - `inverter_state`, `device_state`
+- A new event is written only when the field value changes from the previous successful collection snapshot.
+- On exporter restart, the first post-restart sample seeds the baseline snapshot and does not emit synthetic backfill events.
 
 ### Example calls
 
