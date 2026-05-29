@@ -62,18 +62,18 @@
 - Tests: `npm test`, `npm run build`
 - Success Criteria: dashboard insight data can read latest ambient weather additively.
 - Checklist:
-  - [x] Extend latest telemetry field list.
-  - [x] Extend insight types/calculation output.
-  - [x] Keep cabinet temperature semantics unchanged.
+  - [ ] Extend latest telemetry field list.
+  - [ ] Extend insight types/calculation output.
+  - [ ] Keep cabinet temperature semantics unchanged.
 
 ### Subphase 2.2: Display Ambient Weather Separately
 - Commit: `feat(dashboard): show ambient weather beside cabinet temperature`
 - Tests: `npm test`, `npm run build`
 - Success Criteria: UI distinguishes ambient weather from inverter cabinet temperature and handles stale/unavailable state.
 - Checklist:
-  - [x] Add ambient weather display.
-  - [x] Add stale/unavailable state.
-  - [x] Add i18n keys if user-facing text is introduced.
+  - [ ] Add ambient weather display.
+  - [ ] Add stale/unavailable state.
+  - [ ] Add i18n keys if user-facing text is introduced.
 
 ## Phase 3: Verification
 
@@ -82,16 +82,16 @@
 - Tests: exporter unit tests, dashboard `npm test`, dashboard `npm run build`.
 - Success Criteria: local test/build evidence covers touched contracts.
 - Checklist:
-  - [x] Run exporter tests.
-  - [x] Run dashboard tests if touched.
-  - [x] Run dashboard build if touched.
-  - [x] Inspect scope stayed within this plan.
+  - [ ] Run exporter tests.
+  - [ ] Run dashboard tests if touched.
+  - [ ] Run dashboard build if touched.
+  - [ ] Inspect scope stayed within this plan.
 
 ### Subphase 3.2: Runtime Smoke
 - Commit: no commit unless fixes are required.
 - Tests: live exporter smoke and Influx readback when credentials/environment are available.
 - Success Criteria: weather fields appear in real telemetry rows and weather API calls do not happen every 60 seconds.
 - Checklist:
-  - [x] Confirm weather fetch cadence.
+  - [ ] Confirm weather fetch cadence.
   - [ ] Confirm telemetry write cadence.
   - [ ] Query latest Influx row for weather fields.
