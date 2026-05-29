@@ -22,38 +22,38 @@
 - Tests: `python -m unittest test_weather_client.py`
 - Success Criteria: weather config parses safely and Open-Meteo current responses normalize without touching telemetry collection.
 - Checklist:
-  - [x] Add disabled-by-default weather/site config.
-  - [x] Add Open-Meteo current weather client.
-  - [x] Parse `current.time`, `current.interval`, and current variables.
-  - [x] Handle provider failures as unavailable state.
+  - [ ] Add disabled-by-default weather/site config.
+  - [ ] Add Open-Meteo current weather client.
+  - [ ] Parse `current.time`, `current.interval`, and current variables.
+  - [ ] Handle provider failures as unavailable state.
 
 ### Subphase 1.2: Cache And Telemetry Enrichment
 - Commit: `feat(weather): enrich inverter telemetry with cached current weather`
 - Tests: `python -m unittest test_weather_enrichment.py test_alarm_events.py`
 - Success Criteria: 60-second telemetry rows receive cached weather fields while provider fetch cadence remains 15 minutes by default.
 - Checklist:
-  - [x] Add collector-owned weather cache.
-  - [x] Refresh weather only when cache is due.
-  - [x] Merge weather fields into `TelemetryPoint.measurements`.
-  - [x] Preserve alarm events and existing telemetry collection behavior.
+  - [ ] Add collector-owned weather cache.
+  - [ ] Refresh weather only when cache is due.
+  - [ ] Merge weather fields into `TelemetryPoint.measurements`.
+  - [ ] Preserve alarm events and existing telemetry collection behavior.
 
 ### Subphase 1.3: Solar Position Fields
 - Commit: `feat(weather): add solar position fields to telemetry`
 - Tests: `python -m unittest test_solar_position.py test_weather_enrichment.py`
 - Success Criteria: telemetry rows get deterministic solar geometry fields independent of weather API availability.
 - Checklist:
-  - [x] Add local solar-position helper.
-  - [x] Compute azimuth/elevation/zenith/cos zenith/daylight.
-  - [x] Enrich rows using telemetry timestamp and site coordinates.
+  - [ ] Add local solar-position helper.
+  - [ ] Compute azimuth/elevation/zenith/cos zenith/daylight.
+  - [ ] Enrich rows using telemetry timestamp and site coordinates.
 
 ### Subphase 1.4: Exporter Docs
 - Commit: `docs(weather): document current weather telemetry enrichment`
 - Tests: README/env review.
 - Success Criteria: operators can enable weather safely and understand polling/staleness behavior.
 - Checklist:
-  - [x] Document env vars.
-  - [x] Document 15-minute weather refresh.
-  - [x] Document failure/staleness behavior.
+  - [ ] Document env vars.
+  - [ ] Document 15-minute weather refresh.
+  - [ ] Document failure/staleness behavior.
 
 ## Phase 2: Dashboard Weather Consumer
 
