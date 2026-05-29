@@ -278,50 +278,6 @@ SUN2000_SERIAL_STOPBITS=1
 | `RETRY_DELAY` | `5` | Retry delay in seconds |
 | `EXPORTER_ENABLE_CONTROL` | `false` | Enables `PUT /control` and `PUT /settings` |
 | `EXPORTER_STALE_AFTER_SECONDS` | `180` | Readiness freshness threshold |
-| `WEATHER_ENABLED` | `false` | Enables current ambient weather enrichment on telemetry rows |
-| `WEATHER_PROVIDER` | `open_meteo` | Current weather provider; only `open_meteo` is supported |
-| `WEATHER_REFRESH_INTERVAL_SECONDS` | `900` | Minimum current weather refresh interval; keep aligned with Open-Meteo current resolution |
-| `WEATHER_MAX_STALE_SECONDS` | `3600` | Maximum cached weather age before rows are marked unavailable |
-| `WEATHER_REQUEST_TIMEOUT_SECONDS` | `10` | Weather provider request timeout |
-| `SITE_LATITUDE` | unset | Site latitude used for weather and solar-position fields |
-| `SITE_LONGITUDE` | unset | Site longitude used for weather and solar-position fields |
-| `SITE_TIMEZONE` | `UTC` | Site timezone sent to Open-Meteo |
-
-### Current ambient weather enrichment
-
-When `WEATHER_ENABLED=true` and site coordinates are configured, the exporter fetches Open-Meteo `current=` weather and caches it. Inverter telemetry still collects at `COLLECTION_INTERVAL`, normally 60 seconds, but weather is refreshed at `WEATHER_REFRESH_INTERVAL_SECONDS` or the returned provider interval, whichever is larger. This prevents one weather API call per telemetry row.
-
-Weather provider failures do not block Modbus collection or Influx writes. Fresh cached weather continues to be written until `WEATHER_MAX_STALE_SECONDS`; after that, rows are marked with `weather_available=0` and the stale numeric weather values are omitted.
-
-Added weather fields are additive telemetry fields:
-
-| Field | Unit / meaning |
-| --- | --- |
-| `weather_temperature_2m_c` | Ambient temperature at 2 m, °C |
-| `weather_apparent_temperature_c` | Apparent ambient temperature, °C |
-| `weather_relative_humidity_percent` | Relative humidity, % |
-| `weather_cloud_cover_percent` | Cloud cover, % |
-| `weather_precipitation_mm` | Precipitation, mm |
-| `weather_rain_mm` | Rain, mm |
-| `weather_wind_speed_10m_kph` | Wind speed at 10 m, km/h |
-| `weather_wind_direction_10m_deg` | Wind direction at 10 m, degrees |
-| `weather_wind_gusts_10m_kph` | Wind gusts at 10 m, km/h |
-| `weather_code` | Open-Meteo weather code |
-| `weather_is_day` | Provider day/night flag |
-| `weather_observed_at_epoch` | Provider observation timestamp |
-| `weather_interval_seconds` | Provider current-weather interval |
-| `weather_stale_seconds` | Age of cached weather at telemetry write time |
-| `weather_available` | `1` when fresh weather values are available, otherwise `0` |
-
-Solar-position fields are computed locally when `SITE_LATITUDE` and `SITE_LONGITUDE` are configured, even if weather fetching is disabled:
-
-| Field | Unit / meaning |
-| --- | --- |
-| `solar_azimuth_deg` | Approximate solar azimuth, degrees |
-| `solar_elevation_deg` | Approximate solar elevation, degrees |
-| `solar_zenith_deg` | Approximate solar zenith, degrees |
-| `solar_cos_zenith` | Non-negative cosine of zenith |
-| `solar_daylight_flag` | `1` when calculated elevation is above horizon |
 
 ## API reference
 
