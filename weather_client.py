@@ -1,9 +1,11 @@
 import logging
+import asyncio
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 import requests
+from config import WeatherConfig
 
 logger = logging.getLogger(__name__)
 
@@ -137,3 +139,67 @@ def parse_open_meteo_time(value: Any) -> Optional[datetime]:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+class CachedWeatherProvider:
+    """Caches current weather so telemetry rows do not poll the provider every minute."""
+
+    def __init__(
+        self,
+        client: OpenMeteoCurrentWeatherClient,
+        refresh_interval_seconds: int,
+        max_stale_seconds: int,
+    ):
+        self.client = client
+        self.refresh_interval_seconds = refresh_interval_seconds
+        self.max_stale_seconds = max_stale_seconds
+        self._snapshot: Optional[WeatherSnapshot] = None
+        self._next_refresh_at: Optional[datetime] = None
+
+    async def get_measurements(self, at: datetime) -> Dict[str, Any]:
+        if self._should_refresh(at):
+            snapshot = await asyncio.to_thread(self.client.fetch_current)
+            if snapshot.available:
+                self._snapshot = snapshot
+                interval = max(
+                    self.refresh_interval_seconds,
+                    snapshot.interval_seconds or 0,
+                )
+                self._next_refresh_at = at + timedelta(seconds=interval)
+            else:
+                if self._snapshot is None:
+                    self._snapshot = snapshot
+                retry_seconds = min(self.refresh_interval_seconds, 60)
+                self._next_refresh_at = at + timedelta(seconds=retry_seconds)
+
+        if self._snapshot is None:
+            return {"weather_available": 0}
+        return self._snapshot.to_measurements(at, self.max_stale_seconds)
+
+    def _should_refresh(self, at: datetime) -> bool:
+        return self._next_refresh_at is None or at >= self._next_refresh_at
+
+
+def build_weather_provider(weather_config: WeatherConfig) -> Optional[CachedWeatherProvider]:
+    if not weather_config.enabled:
+        return None
+
+    if weather_config.provider != "open_meteo":
+        logger.warning("Unsupported weather provider configured: %s", weather_config.provider)
+        return None
+
+    if weather_config.latitude is None or weather_config.longitude is None:
+        logger.warning("Weather enrichment enabled without SITE_LATITUDE/SITE_LONGITUDE")
+        return None
+
+    client = OpenMeteoCurrentWeatherClient(
+        latitude=weather_config.latitude,
+        longitude=weather_config.longitude,
+        timezone_name=weather_config.timezone,
+        timeout_seconds=weather_config.request_timeout_seconds,
+    )
+    return CachedWeatherProvider(
+        client=client,
+        refresh_interval_seconds=weather_config.refresh_interval_seconds,
+        max_stale_seconds=weather_config.max_stale_seconds,
+    )
