@@ -7,6 +7,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from collections import deque
 from config import config
 from influxdb_writer import AlarmEventPoint, TelemetryPoint, influxdb_writer
+from solar_position import solar_position_measurements
 from weather_client import build_weather_provider
 
 # Import the modbus client classes
@@ -248,6 +249,14 @@ class DataCollector:
                     telemetry.update(await self.weather_provider.get_measurements(collected_at))
                 except Exception as e:
                     logger.warning(f"Weather enrichment failed without blocking telemetry: {e}")
+            if config.weather.latitude is not None and config.weather.longitude is not None:
+                telemetry.update(
+                    solar_position_measurements(
+                        collected_at,
+                        config.weather.latitude,
+                        config.weather.longitude,
+                    )
+                )
             alarm_events = self._build_alarm_events(telemetry, collected_at)
             
             # Create telemetry point
