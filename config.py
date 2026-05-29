@@ -22,12 +22,6 @@ def env_optional_int(name: str) -> Optional[int]:
         raise ValueError(f"{name} must be greater than 0")
     return parsed
 
-def env_optional_float(name: str) -> Optional[float]:
-    value = os.environ.get(name)
-    if value is None or value.strip() == "":
-        return None
-    return float(value)
-
 def default_modbus_unit_id() -> int:
     configured = os.environ.get("SUN2000_MODBUS_UNIT_ID")
     if configured is not None:
@@ -72,21 +66,6 @@ class ExporterConfig(BaseModel):
     retry_delay: int = Field(default_factory=lambda: int(os.environ.get("RETRY_DELAY", "5")))  # seconds
     enable_control: bool = Field(default_factory=lambda: env_bool("EXPORTER_ENABLE_CONTROL", False))
     stale_after_seconds: int = Field(default_factory=lambda: int(os.environ.get("EXPORTER_STALE_AFTER_SECONDS", "180")))
-
-class WeatherConfig(BaseModel):
-    """Current ambient weather enrichment configuration"""
-    enabled: bool = Field(default_factory=lambda: env_bool("WEATHER_ENABLED", False))
-    provider: str = Field(default_factory=lambda: os.environ.get("WEATHER_PROVIDER", "open_meteo").strip().lower())
-    refresh_interval_seconds: int = Field(
-        default_factory=lambda: int(os.environ.get("WEATHER_REFRESH_INTERVAL_SECONDS", "900"))
-    )
-    max_stale_seconds: int = Field(default_factory=lambda: int(os.environ.get("WEATHER_MAX_STALE_SECONDS", "3600")))
-    latitude: Optional[float] = Field(default_factory=lambda: env_optional_float("SITE_LATITUDE"))
-    longitude: Optional[float] = Field(default_factory=lambda: env_optional_float("SITE_LONGITUDE"))
-    timezone: str = Field(default_factory=lambda: os.environ.get("SITE_TIMEZONE", "UTC"))
-    request_timeout_seconds: float = Field(
-        default_factory=lambda: float(os.environ.get("WEATHER_REQUEST_TIMEOUT_SECONDS", "10"))
-    )
     
 class HTTPConfig(BaseModel):
     """HTTP server configuration"""
@@ -98,7 +77,6 @@ class AppConfig(BaseModel):
     influxdb: InfluxDBConfig = Field(default_factory=InfluxDBConfig)
     modbus: ModbusConfig = Field(default_factory=ModbusConfig)
     exporter: ExporterConfig = Field(default_factory=ExporterConfig)
-    weather: WeatherConfig = Field(default_factory=WeatherConfig)
     http: HTTPConfig = Field(default_factory=HTTPConfig)
 
 # Global config instance
