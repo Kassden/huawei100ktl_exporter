@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Huawei exporter DTU watchdog every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+Unit=dtu-watchdog.service
+
+[Install]
+WantedBy=timers.target
