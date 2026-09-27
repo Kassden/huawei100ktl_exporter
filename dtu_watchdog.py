@@ -48,7 +48,7 @@ class DtuWatchdog:
         nmcli_devices = self.run_text(["nmcli", "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device", "status"], 10)
 
         tailscale_degraded = not (tailscaled and tailscale_status and tailscale_netcheck and tailscale_control_dns)
-        network_degraded = not (gateway and general)
+        network_degraded = not general
         throttled_changed = self.update_throttled_state(throttled)
 
         actions: List[str] = []
@@ -60,6 +60,7 @@ class DtuWatchdog:
 
         self.update_counter("network_failures", network_degraded)
         self.update_counter("tailscale_failures", tailscale_degraded)
+        self.update_counter("tailscaled_failures", not tailscaled)
         self.update_last_healthy(
             gateway=gateway,
             general=general,
@@ -69,23 +70,14 @@ class DtuWatchdog:
 
         if (
             self.config.mode == "auto"
-            and tailscale_degraded
+            and not tailscaled
             and general
-            and self.state["tailscale_failures"] >= self.config.tailscale_failure_threshold
+            and self.state["tailscaled_failures"] >= self.config.tailscale_failure_threshold
         ):
             if self.cooldown_elapsed("last_tailscale_restart", self.config.tailscale_restart_cooldown_seconds):
                 actions.append(self.restart_tailscale())
 
         if self.config.mode == "auto" and self.state["network_failures"] >= self.config.network_failure_threshold:
-            if self.can_reconnect_modem():
-                actions.append(self.reconnect_modem())
-
-        if (
-            self.config.mode == "auto"
-            and tailscale_degraded
-            and general
-            and self.state["tailscale_failures"] >= self.config.tailscale_failure_threshold * 2
-        ):
             if self.can_reconnect_modem():
                 actions.append(self.reconnect_modem())
 
@@ -101,6 +93,7 @@ class DtuWatchdog:
             "tailscale_connectivity": "healthy" if not tailscale_degraded else "degraded",
             "network_failures": self.state["network_failures"],
             "tailscale_failures": self.state["tailscale_failures"],
+            "tailscaled_failures": self.state["tailscaled_failures"],
             "throttled": throttled,
             "warnings": warnings,
             "actions": actions,
@@ -161,16 +154,22 @@ class DtuWatchdog:
     def reconnect_modem(self) -> str:
         connection = self.config.networkmanager_connection
         assert connection is not None
-        self.runner(["nmcli", "connection", "down", connection], 20)
-        self.runner(["nmcli", "connection", "up", connection], 30)
+        down = self.run_command(["nmcli", "connection", "down", connection], 20)
+        up = self.run_command(["nmcli", "connection", "up", connection], 30)
         now = self.now()
         self.state["last_modem_reconnect"] = now
         self.state.setdefault("modem_reconnects", []).append(now)
+        if up.returncode != 0:
+            return f"failed to reconnect NetworkManager connection {connection}: {self.compact_output(up.stderr) or up.returncode}"
+        if down.returncode != 0:
+            return f"activated NetworkManager connection {connection} after down failed: {self.compact_output(down.stderr) or down.returncode}"
         return f"reconnected NetworkManager connection {connection}"
 
     def restart_tailscale(self) -> str:
-        self.runner(["systemctl", "restart", "tailscaled"], 20)
+        result = self.run_command(["systemctl", "restart", "tailscaled"], 20)
         self.state["last_tailscale_restart"] = self.now()
+        if result.returncode != 0:
+            return f"failed to restart tailscaled: {self.compact_output(result.stderr) or result.returncode}"
         return "restarted tailscaled"
 
     def cooldown_elapsed(self, key: str, seconds: int) -> bool:
@@ -195,13 +194,14 @@ class DtuWatchdog:
     def load_state(self) -> Dict[str, object]:
         path = Path(self.config.state_path)
         if not path.exists():
-            return {"network_failures": 0, "tailscale_failures": 0, "modem_reconnects": []}
+            return {"network_failures": 0, "tailscale_failures": 0, "tailscaled_failures": 0, "modem_reconnects": []}
         try:
             state = json.loads(path.read_text())
         except Exception:
-            return {"network_failures": 0, "tailscale_failures": 0, "modem_reconnects": []}
+            return {"network_failures": 0, "tailscale_failures": 0, "tailscaled_failures": 0, "modem_reconnects": []}
         state.setdefault("network_failures", state.pop("general_failures", 0))
         state.setdefault("tailscale_failures", 0)
+        state.setdefault("tailscaled_failures", 0)
         state.setdefault("modem_reconnects", [])
         state.setdefault("last_healthy", {})
         return state
@@ -221,6 +221,7 @@ class DtuWatchdog:
             "exporter_health": result["exporter_health"],
             "tailscale_connectivity": result["tailscale_connectivity"],
             "tailscale_failures": result["tailscale_failures"],
+            "tailscaled_failures": result["tailscaled_failures"],
             "network_failures": result["network_failures"],
             "throttled": result["throttled"],
             "warnings": result["warnings"],

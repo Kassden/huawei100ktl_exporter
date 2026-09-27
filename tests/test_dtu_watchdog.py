@@ -97,7 +97,7 @@ class DtuWatchdogTests(unittest.TestCase):
 
         def runner(command, timeout):
             calls.append(command)
-            if command[:2] == ["tailscale", "netcheck"]:
+            if command[:3] == ["systemctl", "is-active", "--quiet"]:
                 return subprocess.CompletedProcess(command, 1, stdout="")
             return subprocess.CompletedProcess(command, 0, stdout="throttled=0x0")
 
@@ -116,7 +116,7 @@ class DtuWatchdogTests(unittest.TestCase):
         self.assertIn(["systemctl", "restart", "tailscaled"], calls)
         self.assertFalse(any(command[:3] == ["nmcli", "connection", "down"] for command in calls))
 
-    def test_persistent_tailscale_degradation_can_reconnect_network_after_restart_path(self):
+    def test_probe_failure_does_not_restart_service_or_reconnect_network(self):
         calls = []
         now = 1_000
 
@@ -140,9 +140,57 @@ class DtuWatchdogTests(unittest.TestCase):
             )
             result = watchdog.evaluate()
 
-        self.assertEqual(result["actions"], ["reconnected NetworkManager connection Wired connection 2"])
-        self.assertIn(["nmcli", "connection", "down", "Wired connection 2"], calls)
-        self.assertIn(["nmcli", "connection", "up", "Wired connection 2"], calls)
+        self.assertEqual(result["actions"], [])
+        self.assertNotIn(["systemctl", "restart", "tailscaled"], calls)
+        self.assertNotIn(["nmcli", "connection", "down", "Wired connection 2"], calls)
+
+    def test_gateway_probe_failure_with_internet_healthy_does_not_reconnect(self):
+        calls = []
+
+        def runner(command, timeout):
+            calls.append(command)
+            if command[:2] == ["ping", "-c"] and command[-1] == "192.168.0.1":
+                return subprocess.CompletedProcess(command, 1)
+            return subprocess.CompletedProcess(command, 0, stdout="")
+
+        path = self.make_state_path()
+        for _ in range(3):
+            result = DtuWatchdog(
+                WatchdogConfig(state_path=path, event_log_path=self.make_event_path(), mode="auto", networkmanager_connection="Wired connection 2"),
+                runner=runner,
+                now=lambda: 1_000,
+            ).evaluate()
+
+        self.assertEqual(result["gateway"], "degraded")
+        self.assertEqual(result["general_connectivity"], "healthy")
+        self.assertEqual(result["actions"], [])
+        self.assertNotIn(["nmcli", "connection", "down", "Wired connection 2"], calls)
+
+    def test_reconnect_failure_is_recorded_and_rate_limited(self):
+        calls = []
+
+        def runner(command, timeout):
+            calls.append(command)
+            if command[0] == "ping":
+                return subprocess.CompletedProcess(command, 1)
+            if command[:3] == ["nmcli", "connection", "up"]:
+                return subprocess.CompletedProcess(command, 1, stderr="activation failed")
+            return subprocess.CompletedProcess(command, 0, stdout="")
+
+        path = self.make_state_path()
+        third_action = None
+        for attempt in range(4):
+            result = DtuWatchdog(
+                WatchdogConfig(state_path=path, event_log_path=self.make_event_path(), mode="auto", networkmanager_connection="Wired connection 2"),
+                runner=runner,
+                now=lambda: 1_000,
+            ).evaluate()
+            if attempt == 2:
+                third_action = result["actions"]
+
+        self.assertEqual(third_action, ["failed to reconnect NetworkManager connection Wired connection 2: activation failed"])
+        self.assertEqual(result["actions"], [])
+        self.assertEqual(sum(command[:3] == ["nmcli", "connection", "up"] for command in calls), 1)
 
     def test_degraded_check_writes_compact_event_log_with_evidence(self):
         event_path = self.make_event_path()
