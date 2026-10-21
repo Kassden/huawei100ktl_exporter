@@ -174,13 +174,17 @@ sudo systemctl enable --now dtu-watchdog.timer
 
 Observe mode reports general connectivity, local exporter health, and `tailscaled` state but does not reconnect the modem or restart services.
 
-Automatic recovery requires editing the unit after confirming the exact NetworkManager connection ID:
+Automatic recovery requires a site-specific systemd drop-in after confirming the exact NetworkManager connection ID, USB topology, vendor/product ID, and `eth1` attachment. The checked-in Pi 4B example is `deploy/systemd/dtu-watchdog-pi4b-auto.conf`; the base unit remains observe-only. Install the drop-in under `/etc/systemd/system/dtu-watchdog.service.d/` and reload systemd only on that verified Pi.
+
+The auto command needs:
 
 ```text
---mode auto --networkmanager-connection <connection-id>
+--mode auto --networkmanager-connection <connection-id> --usb-device <usb-path> --usb-vendor <id> --usb-product <id> --modem-interface <interface>
 ```
 
-Automatic mode is intentionally narrow: three consecutive general-connectivity failures can reconnect that NetworkManager connection at most once per 15 minutes and three times per hour. Influx-only failures do not reset the modem. Tailscale restarts are allowed only when general connectivity is healthy and `tailscaled` itself is failed.
+Automatic mode treats general connectivity as healthy if either the IP probe or an HTTP connection to `INFLUXDB_URL` succeeds. After three consecutive failures it reconnects NetworkManager, at most once per 15 minutes and three times per hour. If connectivity is still down after six checks and at least three minutes after the reconnect, it validates the USB device's identity and interface, then invokes `usbreset` on that device. USB resets are limited to once per hour and twice per day. The attempt and cooldown are persisted before the reset. Tailscale restarts are allowed only when general connectivity is healthy and `tailscaled` itself is failed.
+
+`usbreset` resets USB enumeration; it is not a guaranteed electrical power cycle of the 4G radio. If the modem only recovers after removing its power, fit a controllable USB power switch or modem reset line and validate that hardware before substituting a power-cycle command. Watch `journalctl -u dtu-watchdog.service`, `/collector/status`, and a cloud readback after commissioning.
 
 ## Verification
 
