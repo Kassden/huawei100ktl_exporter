@@ -298,6 +298,24 @@ class DtuWatchdogTests(unittest.TestCase):
         self.assertIn("skipped USB modem reset: USB vendor/product mismatch", result["actions"])
         self.assertFalse(any(command[0] == "usbreset" for command in calls))
 
+    def test_usb_reset_limit_allows_six_per_rolling_day(self):
+        watchdog = DtuWatchdog(
+            WatchdogConfig(
+                state_path=self.make_state_path(),
+                cloud_probe_url="https://influx.example",
+            ),
+            now=lambda: 100_000,
+        )
+        watchdog.state.update({
+            "network_failures": 6,
+            "last_modem_reconnect": 95_000,
+            "last_usb_reset": 96_000,
+            "usb_resets": [90_000, 91_000, 92_000, 93_000, 96_000],
+        })
+        self.assertTrue(watchdog.can_reset_modem_usb())
+        watchdog.state["usb_resets"].append(97_000)
+        self.assertFalse(watchdog.can_reset_modem_usb())
+
     def test_degraded_check_writes_compact_event_log_with_evidence(self):
         event_path = self.make_event_path()
 

@@ -35,7 +35,7 @@ class WatchdogConfig:
     net_sysfs_root: str = "/sys/class/net"
     usb_reset_threshold: int = 6
     usb_reset_cooldown_seconds: int = 3600
-    max_usb_resets_per_day: int = 2
+    max_usb_resets_per_day: int = 6
 
 
 class DtuWatchdog:
