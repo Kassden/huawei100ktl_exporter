@@ -66,6 +66,16 @@ class ExporterConfig(BaseModel):
     retry_delay: int = Field(default_factory=lambda: int(os.environ.get("RETRY_DELAY", "5")))  # seconds
     enable_control: bool = Field(default_factory=lambda: env_bool("EXPORTER_ENABLE_CONTROL", False))
     stale_after_seconds: int = Field(default_factory=lambda: int(os.environ.get("EXPORTER_STALE_AFTER_SECONDS", "180")))
+
+class SpoolConfig(BaseModel):
+    """Durable local telemetry spool configuration"""
+    enabled: bool = Field(default_factory=lambda: env_bool("SPOOL_ENABLED", False))
+    path: str = Field(default_factory=lambda: os.environ.get("SPOOL_PATH", "/var/lib/huawei-exporter/telemetry-spool.sqlite3"))
+    max_bytes: int = Field(default_factory=lambda: int(os.environ.get("SPOOL_MAX_BYTES", "1073741824")))
+    min_free_bytes: int = Field(default_factory=lambda: int(os.environ.get("SPOOL_MIN_FREE_BYTES", "536870912")))
+    batch_points: int = Field(default_factory=lambda: int(os.environ.get("SPOOL_BATCH_POINTS", "100")))
+    batch_bytes: int = Field(default_factory=lambda: int(os.environ.get("SPOOL_BATCH_BYTES", "262144")))
+    target_days: int = Field(default_factory=lambda: int(os.environ.get("SPOOL_TARGET_DAYS", "45")))
     
 class HTTPConfig(BaseModel):
     """HTTP server configuration"""
@@ -77,6 +87,7 @@ class AppConfig(BaseModel):
     influxdb: InfluxDBConfig = Field(default_factory=InfluxDBConfig)
     modbus: ModbusConfig = Field(default_factory=ModbusConfig)
     exporter: ExporterConfig = Field(default_factory=ExporterConfig)
+    spool: SpoolConfig = Field(default_factory=SpoolConfig)
     http: HTTPConfig = Field(default_factory=HTTPConfig)
 
 # Global config instance
