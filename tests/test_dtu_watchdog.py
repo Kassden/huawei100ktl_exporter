@@ -3,11 +3,26 @@ import json
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
 from dtu_watchdog import DtuWatchdog, WatchdogConfig
 
 
 class DtuWatchdogTests(unittest.TestCase):
+    def make_usb_sysfs(self):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        root = Path(tmpdir.name)
+        device = root / "devices" / "1-1.1"
+        interface = device / "1-1.1:1.0"
+        interface.mkdir(parents=True)
+        network = root / "net" / "eth1"
+        network.mkdir(parents=True)
+        (network / "device").symlink_to(interface)
+        for name, value in {"idVendor": "1286", "idProduct": "4e3d", "busnum": "1", "devnum": "5"}.items():
+            (device / name).write_text(value)
+        return root
+
     def make_state_path(self):
         tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(tmpdir.cleanup)
@@ -191,6 +206,97 @@ class DtuWatchdogTests(unittest.TestCase):
         self.assertEqual(third_action, ["failed to reconnect NetworkManager connection Wired connection 2: activation failed"])
         self.assertEqual(result["actions"], [])
         self.assertEqual(sum(command[:3] == ["nmcli", "connection", "up"] for command in calls), 1)
+
+    def test_auto_escalates_to_identified_usb_modem_after_reconnect_fails(self):
+        calls = []
+        root = self.make_usb_sysfs()
+        state_path = self.make_state_path()
+
+        def runner(command, timeout):
+            calls.append(command)
+            failed = command[0] == "ping" or (command[0] == "curl" and "https://influx.example" in command)
+            return subprocess.CompletedProcess(command, 1 if failed else 0, stdout="")
+
+        for minute in range(12):
+            result = DtuWatchdog(
+                WatchdogConfig(
+                    state_path=state_path,
+                    event_log_path=self.make_event_path(),
+                    mode="auto",
+                    networkmanager_connection="Wired connection 2",
+                    cloud_probe_url="https://influx.example",
+                    usb_device="1-1.1",
+                    usb_vendor="1286",
+                    usb_product="4e3d",
+                    usb_sysfs_root=str(root / "devices"),
+                    net_sysfs_root=str(root / "net"),
+                ),
+                runner=runner,
+                now=lambda minute=minute: 1000 + minute * 60,
+            ).evaluate()
+
+        self.assertEqual(sum(command[:3] == ["nmcli", "connection", "down"] for command in calls), 1)
+        self.assertEqual([command for command in calls if command[0] == "usbreset"], [["usbreset", "001/005"]])
+        self.assertEqual(result["cloud_reachability"], "degraded")
+        state = json.loads(Path(state_path).read_text())
+        self.assertEqual(len(state["usb_resets"]), 1)
+
+    def test_healthy_cloud_path_prevents_modem_reset_when_ping_fails(self):
+        calls = []
+
+        def runner(command, timeout):
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 1 if command[0] == "ping" else 0, stdout="")
+
+        path = self.make_state_path()
+        for minute in range(8):
+            result = DtuWatchdog(
+                WatchdogConfig(
+                    state_path=path,
+                    event_log_path=self.make_event_path(),
+                    mode="auto",
+                    networkmanager_connection="Wired connection 2",
+                    cloud_probe_url="https://influx.example",
+                    usb_device="1-1.1",
+                ),
+                runner=runner,
+                now=lambda minute=minute: 1000 + minute * 60,
+            ).evaluate()
+
+        self.assertEqual(result["general_connectivity"], "healthy")
+        self.assertEqual(result["network_failures"], 0)
+        self.assertFalse(any(command[0] == "usbreset" or command[:2] == ["nmcli", "connection"] for command in calls))
+
+    def test_usb_identity_mismatch_refuses_reset(self):
+        calls = []
+        root = self.make_usb_sysfs()
+        state_path = self.make_state_path()
+
+        def runner(command, timeout):
+            calls.append(command)
+            failed = command[0] == "ping" or (command[0] == "curl" and "https://influx.example" in command)
+            return subprocess.CompletedProcess(command, 1 if failed else 0, stdout="")
+
+        for minute in range(6):
+            result = DtuWatchdog(
+                WatchdogConfig(
+                    state_path=state_path,
+                    event_log_path=self.make_event_path(),
+                    mode="auto",
+                    networkmanager_connection="Wired connection 2",
+                    cloud_probe_url="https://influx.example",
+                    usb_device="1-1.1",
+                    usb_vendor="ffff",
+                    usb_product="4e3d",
+                    usb_sysfs_root=str(root / "devices"),
+                    net_sysfs_root=str(root / "net"),
+                ),
+                runner=runner,
+                now=lambda minute=minute: 1000 + minute * 60,
+            ).evaluate()
+
+        self.assertIn("skipped USB modem reset: USB vendor/product mismatch", result["actions"])
+        self.assertFalse(any(command[0] == "usbreset" for command in calls))
 
     def test_degraded_check_writes_compact_event_log_with_evidence(self):
         event_path = self.make_event_path()
