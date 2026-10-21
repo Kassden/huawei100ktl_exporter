@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import os
 import subprocess
 import time
 from dataclasses import dataclass
@@ -25,6 +26,16 @@ class WatchdogConfig:
     tailscale_restart_cooldown_seconds: int = 900
     tailscale_failure_threshold: int = 3
     network_failure_threshold: int = 3
+    cloud_probe_url: Optional[str] = None
+    usb_device: Optional[str] = None
+    usb_vendor: Optional[str] = None
+    usb_product: Optional[str] = None
+    modem_interface: str = "eth1"
+    usb_sysfs_root: str = "/sys/bus/usb/devices"
+    net_sysfs_root: str = "/sys/class/net"
+    usb_reset_threshold: int = 6
+    usb_reset_cooldown_seconds: int = 3600
+    max_usb_resets_per_day: int = 2
 
 
 class DtuWatchdog:
@@ -36,7 +47,14 @@ class DtuWatchdog:
 
     def evaluate(self) -> Dict[str, object]:
         gateway = self.check_command(["ping", "-c", "1", "-W", "5", self.config.gateway_ip])
-        general = self.check_command(["ping", "-c", "1", "-W", "5", "1.1.1.1"])
+        internet_ping = self.check_command(["ping", "-c", "1", "-W", "5", "1.1.1.1"])
+        cloud_reachable = None
+        if self.config.cloud_probe_url:
+            cloud_reachable = self.check_command([
+                "curl", "--silent", "--show-error", "--output", "/dev/null",
+                "--max-time", "5", self.config.cloud_probe_url,
+            ])
+        general = internet_ping or cloud_reachable is True
         exporter = self.check_command(["curl", "-fsS", "--max-time", "5", self.config.exporter_health_url])
         tailscaled = self.check_command(["systemctl", "is-active", "--quiet", "tailscaled"])
         tailscale_status = self.check_command(["tailscale", "status", "--json"])
@@ -80,11 +98,15 @@ class DtuWatchdog:
         if self.config.mode == "auto" and self.state["network_failures"] >= self.config.network_failure_threshold:
             if self.can_reconnect_modem():
                 actions.append(self.reconnect_modem())
+            if self.config.usb_device and self.can_reset_modem_usb():
+                actions.append(self.reset_modem_usb())
 
         result = {
             "mode": self.config.mode,
             "gateway": "healthy" if gateway else "degraded",
             "general_connectivity": "healthy" if general else "degraded",
+            "internet_ping": "healthy" if internet_ping else "degraded",
+            "cloud_reachability": "not_configured" if cloud_reachable is None else ("healthy" if cloud_reachable else "degraded"),
             "exporter_health": "healthy" if exporter else "degraded",
             "tailscaled": "healthy" if tailscaled else "degraded",
             "tailscale_status": "healthy" if tailscale_status else "degraded",
@@ -146,6 +168,8 @@ class DtuWatchdog:
             return False
         if not self.cooldown_elapsed("last_modem_reconnect", self.config.reconnect_cooldown_seconds):
             return False
+        if not self.cooldown_elapsed("last_usb_reset", 300):
+            return False
         cutoff = self.now() - 3600
         recent = [ts for ts in self.state.get("modem_reconnects", []) if ts >= cutoff]
         self.state["modem_reconnects"] = recent
@@ -164,6 +188,47 @@ class DtuWatchdog:
         if down.returncode != 0:
             return f"activated NetworkManager connection {connection} after down failed: {self.compact_output(down.stderr) or down.returncode}"
         return f"reconnected NetworkManager connection {connection}"
+
+    def can_reset_modem_usb(self) -> bool:
+        if not self.config.cloud_probe_url:
+            return False
+        if self.state["network_failures"] < self.config.usb_reset_threshold:
+            return False
+        last_reconnect = self.state.get("last_modem_reconnect")
+        if not last_reconnect or self.now() - float(last_reconnect) < 180:
+            return False
+        if not self.cooldown_elapsed("last_usb_reset", self.config.usb_reset_cooldown_seconds):
+            return False
+        cutoff = self.now() - 86400
+        recent = [ts for ts in self.state.get("usb_resets", []) if ts >= cutoff]
+        self.state["usb_resets"] = recent
+        return len(recent) < self.config.max_usb_resets_per_day
+
+    def reset_modem_usb(self) -> str:
+        device = Path(self.config.usb_sysfs_root) / str(self.config.usb_device)
+        network_device = Path(self.config.net_sysfs_root) / self.config.modem_interface / "device"
+        try:
+            if not self.config.usb_vendor or not self.config.usb_product:
+                raise ValueError("expected USB vendor/product not configured")
+            if network_device.resolve().parent != device.resolve():
+                raise ValueError(f"{self.config.modem_interface} is not attached to {self.config.usb_device}")
+            vendor = (device / "idVendor").read_text().strip().lower()
+            product = (device / "idProduct").read_text().strip().lower()
+            if (vendor, product) != (self.config.usb_vendor.lower(), self.config.usb_product.lower()):
+                raise ValueError("USB vendor/product mismatch")
+            bus = int((device / "busnum").read_text().strip())
+            number = int((device / "devnum").read_text().strip())
+        except (OSError, ValueError) as exc:
+            return f"skipped USB modem reset: {exc}"
+
+        now = self.now()
+        self.state["last_usb_reset"] = now
+        self.state.setdefault("usb_resets", []).append(now)
+        self.save_state()
+        result = self.run_command(["usbreset", f"{bus:03d}/{number:03d}"], 30)
+        if result.returncode != 0:
+            return f"failed USB modem reset {self.config.usb_device}: {self.compact_output(result.stderr) or result.returncode}"
+        return f"reset USB modem {self.config.usb_device} ({bus:03d}/{number:03d})"
 
     def restart_tailscale(self) -> str:
         result = self.run_command(["systemctl", "restart", "tailscaled"], 20)
@@ -209,7 +274,12 @@ class DtuWatchdog:
     def save_state(self):
         path = Path(self.config.state_path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(self.state, sort_keys=True))
+        temporary = path.with_name(path.name + ".tmp")
+        with temporary.open("w") as handle:
+            json.dump(self.state, handle, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
 
     def append_event(self, result: Dict[str, object]) -> None:
         path = Path(self.config.event_log_path)
@@ -218,6 +288,8 @@ class DtuWatchdog:
             "mode": result["mode"],
             "gateway": result["gateway"],
             "general_connectivity": result["general_connectivity"],
+            "internet_ping": result["internet_ping"],
+            "cloud_reachability": result["cloud_reachability"],
             "exporter_health": result["exporter_health"],
             "tailscale_connectivity": result["tailscale_connectivity"],
             "tailscale_failures": result["tailscale_failures"],
@@ -280,6 +352,10 @@ def parse_args():
     parser.add_argument("--gateway-ip", default="192.168.0.1")
     parser.add_argument("--exporter-health-url", default="http://127.0.0.1:8080/health")
     parser.add_argument("--tailscale-control-host", default="controlplane.tailscale.com")
+    parser.add_argument("--usb-device")
+    parser.add_argument("--usb-vendor")
+    parser.add_argument("--usb-product")
+    parser.add_argument("--modem-interface", default="eth1")
     return parser.parse_args()
 
 
@@ -294,6 +370,11 @@ def main():
             gateway_ip=args.gateway_ip,
             exporter_health_url=args.exporter_health_url,
             tailscale_control_host=args.tailscale_control_host,
+            cloud_probe_url=os.environ.get("INFLUXDB_URL"),
+            usb_device=args.usb_device,
+            usb_vendor=args.usb_vendor,
+            usb_product=args.usb_product,
+            modem_interface=args.modem_interface,
         )
     ).evaluate()
     print(json.dumps(result, indent=2, sort_keys=True))
