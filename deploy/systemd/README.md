@@ -14,6 +14,8 @@ Use this document only for the service layout and install flow.
 ## Files
 
 - `huawei-exporter.service`
+- `dtu-watchdog.service`
+- `dtu-watchdog.timer`
 - `huawei-exporter.env.example`
 - `install-systemd.sh`
 - `push-to-pi.sh`
@@ -25,6 +27,8 @@ Use this document only for the service layout and install flow.
 - app directory: `/opt/huawei100ktl_exporter`
 - service user: `huawei-exporter`
 - env file: `/etc/huawei-exporter.env`
+- durable spool: `/var/lib/huawei-exporter/telemetry-spool.sqlite3`
+- watchdog state: `/var/lib/huawei-exporter/dtu-watchdog-state.json`
 
 ## Fast path
 
@@ -88,6 +92,7 @@ Because `install-systemd.sh` preserves `/etc/huawei-exporter.env` once it alread
 - installs `/etc/huawei-exporter.env` if it does not already exist
 - prefers `/opt/huawei100ktl_exporter/.env.pi4b.local` over the generic example on first install
 - installs and starts `huawei-exporter.service`
+- provides `dtu-watchdog.service` and `dtu-watchdog.timer`; enable the timer only after reviewing the mode and local network connection ID
 
 ## Manual install
 
@@ -140,6 +145,42 @@ sudo systemctl restart huawei-exporter.service
 sudo journalctl -u huawei-exporter.service -f
 sudo systemctl disable --now huawei-exporter.service
 ```
+
+## Durable spool
+
+The exporter uses a SQLite WAL spool when `SPOOL_ENABLED=true` is set in `/etc/huawei-exporter.env`. Existing installations default to disabled until explicitly commissioned:
+
+- database: `/var/lib/huawei-exporter/telemetry-spool.sqlite3`
+- one row per emitted Influx point
+- telemetry and `alarm_events` both pass through the same queue
+- rows are deleted only after synchronous write acknowledgement and cloud readback verification
+
+The systemd unit owns `/var/lib/huawei-exporter` as the `huawei-exporter` user with mode 0700. Confirm at least 512 MiB free beyond the 1 GiB spool budget before enabling. After restart, inspect `/ready`, `/collector/status`, the SQLite row counts, and a fresh cloud source timestamp. A deployment or merge alone does not enable the spool in an existing env file.
+
+Do not put the spool inside `/opt/huawei100ktl_exporter`, `/tmp`, or a release directory. On rollback, preserve `/var/lib/huawei-exporter/telemetry-spool.sqlite3` and its WAL/SHM files. Older memory-only exporter versions cannot drain this database, so rollback is a degraded durability state unless forward-compatible code is restored.
+
+Before live deployment, snapshot with the SQLite backup API or stop the service and copy all three WAL files together. Copying only the main database file while WAL mode is active is not a valid backup.
+
+## DTU watchdog
+
+The watchdog is installed as an optional systemd timer and defaults to observe-only mode:
+
+```bash
+sudo cp deploy/systemd/dtu-watchdog.service /etc/systemd/system/dtu-watchdog.service
+sudo cp deploy/systemd/dtu-watchdog.timer /etc/systemd/system/dtu-watchdog.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now dtu-watchdog.timer
+```
+
+Observe mode reports general connectivity, local exporter health, and `tailscaled` state but does not reconnect the modem or restart services.
+
+Automatic recovery requires editing the unit after confirming the exact NetworkManager connection ID:
+
+```text
+--mode auto --networkmanager-connection <connection-id>
+```
+
+Automatic mode is intentionally narrow: three consecutive general-connectivity failures can reconnect that NetworkManager connection at most once per 15 minutes and three times per hour. Influx-only failures do not reset the modem. Tailscale restarts are allowed only when general connectivity is healthy and `tailscaled` itself is failed.
 
 ## Verification
 

@@ -11,6 +11,35 @@ RTU-first Huawei SUN2000 exporter for the `SUN2000-100KTL-M2`, with:
 
 This repo is now documented from the live code rather than the deleted `docs/` bundle.
 
+## Architecture boundary
+
+This exporter runs on the edge device. Keep it limited to Huawei inverter source-device truth:
+
+- Modbus transport and inverter register reads/writes.
+- Raw inverter telemetry and device identity.
+- Inverter alarm/state transition persistence.
+- Local health/readiness and explicitly enabled controls/settings.
+
+Do not add cloud enrichment to this service. Weather, ambient context, shade context, provider retries/caches, historical backfills, and analytics that depend on external internet services belong in a cloud/backend job and should be joined with exporter telemetry downstream.
+
+## DTU resilience
+
+When `SPOOL_ENABLED=true`, the exporter persists outbound telemetry in a local SQLite WAL spool before writing to InfluxDB. The spool stores one immutable row per emitted Influx point with all tags, all fields, the source timestamp, and line protocol. Telemetry rows and `alarm_events` use the same queue. Existing installations remain on the memory buffer until explicitly enabled.
+
+Default path:
+
+```text
+/var/lib/huawei-exporter/telemetry-spool.sqlite3
+```
+
+Important operating rules:
+
+- Source timestamps are preserved; replay never restamps historical data with upload time.
+- Rows are not deleted until synchronous Influx write acknowledgement and readback verification both succeed.
+- The alarm snapshot baseline is persisted so a restart does not create synthetic alarm transitions.
+- Rollback must preserve `/var/lib/huawei-exporter/telemetry-spool.sqlite3`, `-wal`, and `-shm`.
+- The optional DTU watchdog ships in observe-only mode first. Do not enable automatic modem reconnect until the exact NetworkManager connection ID and maintenance window are approved.
+
 ## Fit for the 100KTL-M2
 
 This exporter is currently aligned to the live register maps in:
@@ -301,13 +330,99 @@ SUN2000_SERIAL_STOPBITS=1
 
 ### Alarm transition persistence model
 
-- Transition fields tracked each collection cycle:
+- Snapshot fields tracked each collection cycle:
   - `alarm_1`, `alarm_2`, `alarm_3`
   - `highest_priority_alarm_code`
   - `number_of_critical_alarms`, `number_of_major_alarms`, `number_of_minor_alarms`, `number_of_warning_alarms`
   - `inverter_state`, `device_state`
-- A new event is written only when the field value changes from the previous successful collection snapshot.
+- Alarm register changes are decoded bit by bit for confirmed Huawei registers `alarm_1`, `alarm_2`, and `alarm_3`.
+- A decoded alarm event is written only when a registered alarm bit changes from the previous successful collection snapshot.
+- State events are written only when `inverter_state` or `device_state` changes.
+- If `highest_priority_alarm_code` changes and no decoded bit transition explains it, a fallback event is written with `source_field=highest_priority_alarm_code`.
 - On exporter restart, the first post-restart sample seeds the baseline snapshot and does not emit synthetic backfill events.
+
+### Alarm/alert registry
+
+This registry is source-device truth from the Huawei Modbus alarm table. The exporter decodes only the confirmed alarm registers it reads from the live telemetry map:
+
+| Field | Register | Decoded bits | Notes |
+| --- | --- | --- | --- |
+| `alarm_1` | 32008 | 0-15 | Confirmed and decoded |
+| `alarm_2` | 32009 | 0-15 | Confirmed and decoded |
+| `alarm_3` | 32010 | 0-8 | Confirmed and decoded |
+| `alarm_4` | not read | — | Dictionary rows exist downstream, but the register address is not confirmed here |
+| `alarm_5` | not read | — | Dictionary rows exist downstream, but the register address is not confirmed here |
+
+Severity mapping:
+
+| Huawei label | Exporter severity | Meaning in this exporter |
+| --- | --- | --- |
+| `重要` | `major` | Important inverter alarm |
+| `次要` | `minor` | Minor inverter alarm |
+| `提示` | `warning` | Advisory inverter alarm |
+
+Decoded `alarm_events` points keep low-cardinality values as tags and decoded labels as fields:
+
+| Name | Influx kind | Present on | Description |
+| --- | --- | --- | --- |
+| `device_id` | tag | all events | Exporter device id |
+| `site_id` | tag | all events | Exporter site id |
+| `event_type` | tag | all events | `alarm_transition` or `state_transition` |
+| `source_field` | tag | all events | Source field, for example `alarm_3` or `highest_priority_alarm_code` |
+| `severity` | tag | all events | `critical`, `major`, `minor`, `warning`, or `none` |
+| `alarm_code` | field | all events | Huawei alarm ID or highest-priority fallback code |
+| `previous_value` | field | changed value events | Previous bit/state/code value |
+| `current_value` | field | changed value events | Current bit/state/code value |
+| `source_bit` | field | decoded bit events | Changed bit number inside the alarm register |
+| `decoded_alarm_title` | field | decoded bit events | English alarm title |
+| `decoded_alarm_source_name_zh` | field | decoded bit events | Huawei Chinese alarm name |
+| `decoded_huawei_severity` | field | decoded bit events | Original Huawei severity label |
+
+Confirmed decoded alarm bits:
+
+| Field | Bit | Alarm ID | Severity | Chinese source name | English title |
+| --- | ---: | ---: | --- | --- | --- |
+| `alarm_1` | 0 | 2001 | major | 输入组串电压高 | High input string voltage |
+| `alarm_1` | 1 | 2002 | major | 直流电弧故障 | DC arc fault |
+| `alarm_1` | 2 | 2011 | major | 组串反接 | String reverse connection |
+| `alarm_1` | 3 | 2012 | warning | 组串电流反灌 | String current backfeed |
+| `alarm_1` | 4 | 2013 | warning | 组串功率异常 | Abnormal string power |
+| `alarm_1` | 5 | 2021 | major | AFCI自检失败 | AFCI self-check failed |
+| `alarm_1` | 6 | 2031 | major | 电网相线对PE短路 | Grid phase short-circuited to PE |
+| `alarm_1` | 7 | 2032 | major | 电网掉电 | Grid power loss |
+| `alarm_1` | 8 | 2033 | major | 电网欠压 | Grid undervoltage |
+| `alarm_1` | 9 | 2034 | major | 电网过压 | Grid overvoltage |
+| `alarm_1` | 10 | 2035 | major | 电网电压不平衡 | Grid voltage imbalance |
+| `alarm_1` | 11 | 2036 | major | 电网过频 | Grid overfrequency |
+| `alarm_1` | 12 | 2037 | major | 电网欠频 | Grid underfrequency |
+| `alarm_1` | 13 | 2038 | major | 电网频率不稳定 | Unstable grid frequency |
+| `alarm_1` | 14 | 2039 | major | 输出过流 | Output overcurrent |
+| `alarm_1` | 15 | 2040 | major | 输出电流直流分量过大 | Excessive DC component in output current |
+| `alarm_2` | 0 | 2051 | major | 残余电流异常 | Abnormal residual current |
+| `alarm_2` | 1 | 2061 | major | 系统接地异常 | Abnormal system grounding |
+| `alarm_2` | 2 | 2062 | major | 绝缘阻抗低 | Low insulation resistance |
+| `alarm_2` | 3 | 2063 | minor | 温度过高 | High temperature |
+| `alarm_2` | 4 | 2064 | major | 设备异常 | Device fault |
+| `alarm_2` | 5 | 2065 | minor | 升级失败或版本不匹配 | Upgrade failed or version mismatch |
+| `alarm_2` | 6 | 2066 | warning | License到期 | License expired |
+| `alarm_2` | 7 | 61440 | minor | 监控单元故障 | Monitoring unit fault |
+| `alarm_2` | 8 | 2067 | major | 功率采集器故障 | Power collector fault |
+| `alarm_2` | 9 | 2068 | minor | 储能设备异常 | Energy storage device fault |
+| `alarm_2` | 10 | 2070 | major | 主动孤岛 | Active islanding |
+| `alarm_2` | 11 | 2071 | major | 被动孤岛 | Passive islanding |
+| `alarm_2` | 12 | 2072 | major | 瞬时交流过压 | Transient AC overvoltage |
+| `alarm_2` | 13 | 2075 | warning | 外部设备端口短路 | External device port short circuit |
+| `alarm_2` | 14 | 2077 | major | 离网输出过载 | Off-grid output overload |
+| `alarm_2` | 15 | 2080 | major | 电池板配置异常 | PV module configuration fault |
+| `alarm_3` | 0 | 2081 | warning | 优化器故障 | Optimizer fault |
+| `alarm_3` | 1 | 2085 | minor | 内置PID工作异常 | Built-in PID operation fault |
+| `alarm_3` | 2 | 2014 | major | 输入组串对地电压高 | High input string voltage to ground |
+| `alarm_3` | 3 | 2086 | major | 外部风扇异常 | External fan fault |
+| `alarm_3` | 4 | 2069 | major | 储能反接 | Energy storage reverse connection |
+| `alarm_3` | 5 | 2082 | major | 并离网控制器异常 | On-grid/off-grid controller fault |
+| `alarm_3` | 6 | 2015 | warning | 组串丢失 | String loss |
+| `alarm_3` | 7 | 2087 | major | 内部风扇异常 | Internal fan fault |
+| `alarm_3` | 8 | 2088 | major | 直流保护单元异常 | DC protection unit fault |
 
 ### Example calls
 
