@@ -182,9 +182,15 @@ The auto command needs:
 --mode auto --networkmanager-connection <connection-id> --usb-device <usb-path> --usb-vendor <id> --usb-product <id> --modem-interface <interface>
 ```
 
+The verified Pi 4B installation also passes `--vbus-hub 1-1 --vbus-hub-vendor 2109 --vbus-hub-product 3431`. This opts in to a full-hub power cycle only for that exact hub, modem `1286:4e3d` at `1-1.1`, and `eth1`, with no other USB devices attached. Leave these VBUS arguments out on unverified Pis.
+
 Automatic mode treats general connectivity as healthy if either the IP probe or an HTTP connection to `INFLUXDB_URL` succeeds. After three consecutive failures it reconnects NetworkManager, at most once per 15 minutes and three times per hour. If connectivity is still down after six checks and at least three minutes after the reconnect, it validates the USB device's identity and interface, then invokes `usbreset` on that device. USB resets are limited to once per hour and six times in a rolling 24-hour window. The attempt and cooldown are persisted before the reset. Tailscale restarts are allowed only when general connectivity is healthy and `tailscaled` itself is failed.
 
-`usbreset` resets USB enumeration; it is not a guaranteed electrical power cycle of the 4G radio. If the modem only recovers after removing its power, fit a controllable USB power switch or modem reset line and validate that hardware before substituting a power-cycle command. Watch `journalctl -u dtu-watchdog.service`, `/collector/status`, and a cloud readback after commissioning.
+`usbreset` resets USB enumeration; it is not an electrical power cycle. The Pi 4B's ports are ganged. A single-port `uhubctl -e -l 1-1 -p 1` command disconnected the modem but left it powered and did not restore the link. A separately supervised `uhubctl -l 1-1 -a off` test turned its lights fully off; timed `uhubctl -l 1-1 -a on` restored USB enumeration, `eth1`, and Tailscale without a Pi reboot. Never run the `off` command remotely without independent timed `on` commands and onsite recovery.
+
+With the verified Pi-specific drop-in, the watchdog considers full-hub power cycling only after 12 consecutive general network failures, a USB reset in the current outage, and no action in the same run. It skips current undervoltage and limits cycles to one per hour and four per rolling day. Before switching off, it validates the hub, modem, interface, and absence of other USB devices, then arms two independent systemd power-on timers for 45 and 110 seconds. A supervised cycle proved the electrical path and reconnect, but automatic recovery from a future real modem wedge has not yet been observed.
+
+The supervised full-hub power-on logged a brief Pi undervoltage event. Check the Pi power supply and modem load; a dedicated powered switched hub or supply may be needed for reliable repeated cycles. Watch `journalctl -u dtu-watchdog.service`, `/collector/status`, and cloud readback after commissioning.
 
 ## Verification
 
