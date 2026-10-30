@@ -143,17 +143,20 @@
 ### Subphase 3.2: Drain and read back the live backlog
 - Objective: replay all pending telemetry and alarm rows at original source times.
 - Inspect: Pi `/collector/status`, SQLite counts, cloud `alarm_events` and telemetry, Influx write/partial-write logs.
-- Allowed touch: `data_collector.py` bounded replay loop, `influxdb_writer.py` bounded parallel readback, focused tests, live operational calls, and `.mega/` proof. This expansion is based on the measured 100 rows/minute recovery rate with 12,000 pending rows.
+- Allowed touch: `data_collector.py` bounded replay loop, `influxdb_writer.py` bounded parallel readback, `telemetry_spool.py` alarm fairness, focused tests, live operational calls, and `.mega/` proof. This expansion is based on the measured 100 rows/minute recovery rate with 12,000 pending rows and independent readback showing alarm starvation.
 - Commit: bounded replay change, tests, evidence and runbook note if necessary.
-- Tests: verify batch concurrency cap and stop-on-error, full suite, zero pending/ack/quarantine; readback earliest/middle/latest telemetry and all alarm event fields; post-restart fresh sample.
+- Tests: verify batch concurrency cap, stop-on-error, and alarm selection amid telemetry backlog; full suite, zero pending/ack/quarantine; readback earliest/middle/latest telemetry and all alarm event fields; post-restart fresh sample.
 - Success Criteria: cloud and queue both confirm completion; no 400 or hidden partial writes.
 - Planned Touch Files:
   - `data_collector.py`
   - `influxdb_writer.py`
+  - `telemetry_spool.py`
   - `tests/test_spool_drain.py`
+  - `tests/test_telemetry_spool.py`
   - `.mega/`
 - Checklist:
   - [ ] Bounded replay with four concurrent readback queries, a time budget per scheduler run, periodic counts and error stop condition.
+  - [ ] Reserve up to ten alarm rows per batch while retaining newest telemetry and oldest-first replay.
   - [ ] Verify source timestamps and fields, then record final counts.
 
 ## Phase 4: Health verification
