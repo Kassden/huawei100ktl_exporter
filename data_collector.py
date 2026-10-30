@@ -197,9 +197,11 @@ class DataCollector:
                 replace_existing=True,
             )
 
-            # Collect and upload immediately so commissioning does not wait
+            # Collect immediately. A large persisted spool can take minutes to
+            # verify in cloud; do not hold the API startup behind that replay.
             await self._collect_and_buffer_data()
-            await self._upload_batch()
+            if not self.telemetry_spool:
+                await self._upload_batch()
 
             self.scheduler.start()
             self.is_running = True
