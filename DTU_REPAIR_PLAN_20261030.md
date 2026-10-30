@@ -71,7 +71,7 @@
 - Damage: systemic live telemetry and recovery path.
 - Edge cases: duplicate same-second alarms, field/tag conflicts, mixed partial writes, replay after restart, duplicate migration, corrupt row, disk-full backup, disconnected Influx, USB identity mismatch, power-off command losing SSH.
 - Failure simulations: HTTP 400/partial write, readback mismatch, SQLite rollback, stale backlog, transient 4G drop.
-- Optimization: bound cloud verification queries and replay rate; inspect batch behavior with mixed measurements before high-volume drain.
+- Optimization: bound cloud verification concurrency and replay time per scheduler run; inspect batch behavior with mixed measurements before high-volume drain.
 - Must-fix: any data loss, inconsistent row identity, silent health success with stuck queue, or uncontrolled USB power action.
 - Evidence: focused tests, backup integrity, live source timestamp readback, kernel/journal receipts.
 
@@ -143,14 +143,17 @@
 ### Subphase 3.2: Drain and read back the live backlog
 - Objective: replay all pending telemetry and alarm rows at original source times.
 - Inspect: Pi `/collector/status`, SQLite counts, cloud `alarm_events` and telemetry, Influx write/partial-write logs.
-- Allowed touch: live operational calls and `.mega/` proof only.
-- Commit: evidence and runbook note if necessary.
-- Tests: zero pending/ack/quarantine; readback earliest/middle/latest telemetry and all alarm event fields; post-restart fresh sample.
+- Allowed touch: `data_collector.py` bounded replay loop, `influxdb_writer.py` bounded parallel readback, focused tests, live operational calls, and `.mega/` proof. This expansion is based on the measured 100 rows/minute recovery rate with 12,000 pending rows.
+- Commit: bounded replay change, tests, evidence and runbook note if necessary.
+- Tests: verify batch concurrency cap and stop-on-error, full suite, zero pending/ack/quarantine; readback earliest/middle/latest telemetry and all alarm event fields; post-restart fresh sample.
 - Success Criteria: cloud and queue both confirm completion; no 400 or hidden partial writes.
 - Planned Touch Files:
+  - `data_collector.py`
+  - `influxdb_writer.py`
+  - `tests/test_spool_drain.py`
   - `.mega/`
 - Checklist:
-  - [ ] Bounded replay with periodic counts and error stop condition.
+  - [ ] Bounded replay with four concurrent readback queries, a time budget per scheduler run, periodic counts and error stop condition.
   - [ ] Verify source timestamps and fields, then record final counts.
 
 ## Phase 4: Health verification
