@@ -1,0 +1,8 @@
+# Supervised 4G hub-port drill, Oct 30 2026 HKT
+
+- Operator onsite and explicitly authorized one supervised USB power-off/on drill. A transient systemd timer was armed to run `/usr/sbin/uhubctl -e -l 1-1 -p 1 -a on` after 30 seconds. The selected hub was the Pi 4B VIA 2109:3431 and the modem was its only attached device.
+- At 12:25:33 the off command removed `eth1`; kernel logged `usb 1-1.1: USB disconnect, device number 9` and RNDIS unregister. The remote Tailscale/SSH link dropped.
+- At 12:25:44-45, the timer executed successfully. `uhubctl` reported port 1 changing from `0000 off` to `0101 power connect []`. No USB re-enumeration or `eth1` recovery followed in the previous-boot kernel/NetworkManager journal.
+- The onsite user reported the card had power but the Pi remained unreachable after a physical card switch off/on. A Pi power cycle restored connectivity. New boot time was 12:33:09; `eth1`, Tailscale, exporter, and SQLite integrity were healthy after boot.
+- At 12:30:29-33, the previous boot kernel logged undervoltage detected then voltage normalized. This was during the recovery period, after the remote timer. It does not establish the cause of the earlier 4G wedge or the failed re-enumeration.
+- Conclusion: the software hub-port off/on is **not a proven electrical modem power cycle or safe unattended recovery path** on this installation. Do not add it to watchdog auto mode. The installed watchdog still does NetworkManager reconnect and USB enumeration reset; the Oct 29-30 outage showed those did not restore that modem failure. A dedicated, independently switched 4G power path (or supported modem reset line) with remote-on failsafe and a supervised recovery drill is required before automatic modem power cycling can be claimed.
