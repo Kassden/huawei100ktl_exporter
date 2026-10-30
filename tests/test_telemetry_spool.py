@@ -1,7 +1,7 @@
 import os
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from telemetry_spool import TelemetrySpool
 
@@ -97,6 +97,28 @@ class TelemetrySpoolTests(unittest.TestCase):
         self.assertTrue(spool.enqueue(**kwargs))
         self.assertFalse(spool.enqueue(**kwargs))
         self.assertEqual(spool.stats()["spool_pending"], 1)
+
+    def test_pending_batch_reserves_alarm_rows_amid_telemetry_backlog(self):
+        spool = self.make_spool()
+        spool.batch_points = 15
+        start = datetime(2026, 9, 20, tzinfo=timezone.utc)
+        for minute in range(30):
+            ts = start + timedelta(minutes=minute)
+            spool.enqueue(source_ts=ts, measurement="huawei_sun2000", site="site", device="device",
+                          fields={"active_power": float(minute)}, tags={"site_id": "site", "device_id": "device"},
+                          line_protocol=f"huawei_sun2000,device_id=device,site_id=site active_power={minute} {int(ts.timestamp())}")
+        for minute in (5, 10, 15):
+            ts = start + timedelta(minutes=minute)
+            spool.enqueue(source_ts=ts, measurement="alarm_events", site="site", device="device",
+                          fields={"alarm_code": float(2000 + minute)},
+                          tags={"site_id": "site", "device_id": "device", "event_key": f"{2000 + minute}:none"},
+                          line_protocol=f"alarm_events,device_id=device,event_key={2000 + minute}:none,site_id=site alarm_code={2000 + minute} {int(ts.timestamp())}")
+        batch = spool.pending_batch()
+        self.assertEqual(len(batch), 15)
+        self.assertEqual(len({row.id for row in batch}), 15)
+        self.assertEqual(sum(row.measurement == "alarm_events" for row in batch), 3)
+        self.assertEqual([row.fields["active_power"] for row in batch[:10]], list(map(float, range(29, 19, -1))))
+        self.assertEqual([row.fields["active_power"] for row in batch[-2:]], [0.0, 1.0])
 
     def test_acknowledged_rows_are_deleted_only_after_drain(self):
         spool = self.make_spool()

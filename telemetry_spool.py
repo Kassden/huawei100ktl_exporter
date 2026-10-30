@@ -219,29 +219,29 @@ class TelemetrySpool:
 
     def pending_batch(self) -> List[SpoolRecord]:
         self._require_conn()
-        rows = self.conn.execute(
-            """
-            SELECT * FROM telemetry_spool
-            WHERE status = 'pending'
-              AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
-            ORDER BY source_ts DESC, id DESC
-            LIMIT 10
-            """,
-            (datetime.now(timezone.utc).isoformat(),),
-        ).fetchall()
-        newest_ids = {row["id"] for row in rows}
-        if len(rows) < self.batch_points:
-            older = self.conn.execute(
-                """
-                SELECT * FROM telemetry_spool
-                WHERE status = 'pending'
-                  AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
-                ORDER BY source_ts ASC, id ASC
-                LIMIT ?
-                """,
-                (datetime.now(timezone.utc).isoformat(), self.batch_points - len(rows)),
-            ).fetchall()
-            rows.extend(row for row in older if row["id"] not in newest_ids)
+        now = datetime.now(timezone.utc).isoformat()
+        rows = []
+        selected_ids = set()
+
+        def add_rows(limit: int, order: str, alarms_only: bool = False):
+            if limit <= 0:
+                return
+            sql = "SELECT * FROM telemetry_spool WHERE status='pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)"
+            params: List[Any] = [now]
+            if alarms_only:
+                sql += " AND measurement='alarm_events'"
+            if selected_ids:
+                sql += f" AND id NOT IN ({','.join('?' for _ in selected_ids)})"
+                params.extend(sorted(selected_ids))
+            sql += f" ORDER BY source_ts {order}, id {order} LIMIT ?"
+            params.append(limit)
+            for row in self.conn.execute(sql, params).fetchall():
+                rows.append(row)
+                selected_ids.add(row["id"])
+
+        add_rows(min(10, self.batch_points), "DESC")
+        add_rows(min(10, self.batch_points - len(rows)), "DESC", alarms_only=True)
+        add_rows(self.batch_points - len(rows), "ASC")
 
         records: List[SpoolRecord] = []
         bytes_used = 0
