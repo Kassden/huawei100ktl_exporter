@@ -9,7 +9,7 @@
 - [ ] Old pending alarm rows are converted transactionally without deleting data; a repeat migration is a no-op.
 - [ ] Pi exporter collects through the cutover; the backlog drains to zero pending/acknowledged/quarantined, and cloud readback verifies the earliest, middle, latest, and alarm source points.
 - [ ] `/health` reports cloud-delivery degradation while keeping local collection readiness distinct; tests cover a stuck spool.
-- [ ] The modem power path is verified against actual Pi hub topology. Perform one supervised VBUS drill only if supported and authorized; otherwise record the hardware prerequisite, leaving USB reset labeled as such.
+- [ ] The modem power path is verified against actual Pi hub topology. A supervised full-hub VBUS drill proves recovery; a bounded, fail-safe automatic VBUS action is installed only for this exact Pi topology and only after softer recovery fails.
 - [ ] Code, migration, tests, and operational evidence are committed and pushed on the repair branch. No unrelated dashboard or vendor files change.
 
 ## Runtime Contract
@@ -80,10 +80,10 @@
 - Similar use cases: all exporter alarms and telemetry use the same spool/drain path.
 - Recurrence: high for schema changes and intermittent network; migrate via explicit versioned one-shot tool, not arbitrary string rewrites.
 - General mechanism: single alarm identity builder and shared serializer for current/future events; migration uses these functions.
-- One-off: Pi-specific power topology and supervised drill are hardware-specific, not generalized into all deployments.
+- One-off: Pi-specific power topology and supervised drill are hardware-specific. Automatic VBUS recovery must fail closed on other USB devices, exact hub/modem identity mismatch, or missing timed-on failsafe.
 
 ## Regression Guardrails
-- Planned edit surface: `influxdb_writer.py`, `telemetry_spool.py` only if identity helper needed, `data_collector.py`, `iot_driver_copilot/huawei_sun_2000_solar_inverter/driver.py`, `scripts/repair_alarm_spool.py`, `test_alarm_events.py`, `tests/test_spool_drain.py`, `tests/test_alarm_spool_repair.py`, `tests/test_health_delivery.py`, this plan, `.mega/` proof and decisions. Pi: scoped exporter code, SQLite, systemd service, read-only USB capability check. Dashboard repo remains untouched.
+- Planned edit surface: `influxdb_writer.py`, `telemetry_spool.py`, `data_collector.py`, `iot_driver_copilot/huawei_sun_2000_solar_inverter/driver.py`, `scripts/repair_alarm_spool.py`, `dtu_watchdog.py`, `deploy/systemd/dtu-watchdog-pi4b-auto.conf`, focused tests, this plan, `.mega/` proof and decisions. Pi: scoped exporter code, SQLite, systemd service, and verified USB VBUS action. Dashboard repo remains untouched.
 - Protected: collection and Modbus, exact timestamps/fields/tags, alarm history query compatibility, SQLite durability, existing watchdog cadence and bounded reset limits.
 - Consumers: Pi exporter, dashboard alarm query, Influx bucket, watchdog, operators reading `/ready` and `/health`.
 - Damage radius: systemic; data shape and live deploy could silently lose or duplicate data.
@@ -181,12 +181,16 @@
 ### Subphase 5.1: Verify remote electrical power control or name hardware block
 - Objective: distinguish USB enumeration reset from real modem VBUS power removal.
 - Inspect: `lsusb -t`, hub descriptors, `uhubctl` support, Pi USB topology, kernel events; no code change unless a safe supported power path is proven.
-- Allowed touch: `.mega/` evidence and Pi package/tool setup only if required; any watchdog change is a new reviewed subphase, not silent scope expansion.
-- Commit: capability report; separate guarded watchdog commit only if true VBUS behavior is proven.
-- Tests: read-only topology and hub power status; one onsite-authorized supervised VBUS off/on drill if supported; Tailscale/exporter/cloud recovery readback.
-- Success Criteria: either verified VBUS power cycle with rollback/reconnect evidence or explicit unsupported-hardware blocker and specified switched USB hub/reset-line requirement.
+- Allowed touch: `.mega/` evidence, `dtu_watchdog.py`, `tests/test_dtu_watchdog.py`, Pi-specific auto drop-in, and Pi `uhubctl` package. Full-hub switching was separately approved and proven after the first single-port attempt failed.
+- Commit: capability report and guarded watchdog action as separate commits.
+- Tests: read-only topology and hub power status; onsite-authorized full-hub VBUS off/on drill; Tailscale/exporter/cloud recovery readback; topology mismatch, timer failure, cooldown, and rate-limit unit tests; natural scheduled run after deployment.
+- Success Criteria: verified electrical power-off and reconnection without reboot, plus a fail-closed automatic VBUS action installed only on the verified Pi. No claim of recovery from an actual future wedge until observed.
 - Planned Touch Files:
   - `.mega/`
+  - `dtu_watchdog.py`
+  - `tests/test_dtu_watchdog.py`
+  - `deploy/systemd/dtu-watchdog-pi4b-auto.conf`
 - Checklist:
   - [ ] Check hub support without interrupting the Pi.
-  - [ ] Execute at most one supervised drill if technically supported; otherwise document hardware prerequisite.
+  - [ ] Preserve both supervised drill receipts, including single-port failure and full-hub recovery.
+  - [ ] Implement and deploy guarded automatic full-hub power cycle with two timed-on failsafes and strict identity/topology checks.
