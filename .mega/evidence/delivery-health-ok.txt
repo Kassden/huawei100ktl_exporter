@@ -1,0 +1,1 @@
+delivery_degraded_and_recovered_health_verified

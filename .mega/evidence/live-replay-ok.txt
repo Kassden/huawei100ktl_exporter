@@ -1,0 +1,1 @@
+pending=0 acknowledged=0 quarantined=0 cloud_source_readback=verified
