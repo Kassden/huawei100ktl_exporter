@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import re
 import subprocess
 import time
 from dataclasses import dataclass
@@ -36,6 +37,12 @@ class WatchdogConfig:
     usb_reset_threshold: int = 6
     usb_reset_cooldown_seconds: int = 3600
     max_usb_resets_per_day: int = 6
+    vbus_hub: Optional[str] = None
+    vbus_hub_vendor: Optional[str] = None
+    vbus_hub_product: Optional[str] = None
+    vbus_cycle_threshold: int = 12
+    vbus_cycle_cooldown_seconds: int = 3600
+    max_vbus_cycles_per_day: int = 4
 
 
 class DtuWatchdog:
@@ -100,6 +107,8 @@ class DtuWatchdog:
                 actions.append(self.reconnect_modem())
             if self.config.usb_device and self.can_reset_modem_usb():
                 actions.append(self.reset_modem_usb())
+            if self.config.vbus_hub and not actions and self.can_cycle_modem_vbus():
+                actions.append(self.cycle_modem_vbus())
 
         result = {
             "mode": self.config.mode,
@@ -230,6 +239,70 @@ class DtuWatchdog:
             return f"failed USB modem reset {self.config.usb_device}: {self.compact_output(result.stderr) or result.returncode}"
         return f"reset USB modem {self.config.usb_device} ({bus:03d}/{number:03d})"
 
+    def can_cycle_modem_vbus(self) -> bool:
+        if not self.config.cloud_probe_url or self.state["network_failures"] < self.config.vbus_cycle_threshold:
+            return False
+        last_reset = self.state.get("last_usb_reset")
+        if not last_reset or self.now() - float(last_reset) < 180:
+            return False
+        last_general_healthy = self.state.get("last_healthy", {}).get("general")
+        if last_general_healthy and float(last_reset) < float(last_general_healthy):
+            return False  # USB reset must belong to the current outage.
+        if not self.cooldown_elapsed("last_vbus_cycle", self.config.vbus_cycle_cooldown_seconds):
+            return False
+        throttled = self.state.get("last_throttled", "")
+        try:
+            if int(str(throttled).split("=", 1)[1], 16) & 1:
+                return False  # Current undervoltage: avoid modem inrush.
+        except (IndexError, ValueError):
+            pass
+        cutoff = self.now() - 86400
+        recent = [ts for ts in self.state.get("vbus_cycles", []) if ts >= cutoff]
+        self.state["vbus_cycles"] = recent
+        return len(recent) < self.config.max_vbus_cycles_per_day
+
+    def cycle_modem_vbus(self) -> str:
+        root = Path(self.config.usb_sysfs_root)
+        hub_name = self.config.vbus_hub
+        modem_name = self.config.usb_device
+        try:
+            if hub_name != "1-1" or modem_name != "1-1.1":
+                raise ValueError("unverified Pi 4B hub/modem topology")
+            hub = root / hub_name
+            modem = root / modem_name
+            if (hub / "idVendor").read_text().strip().lower() != str(self.config.vbus_hub_vendor).lower() or \
+               (hub / "idProduct").read_text().strip().lower() != str(self.config.vbus_hub_product).lower():
+                raise ValueError("USB hub identity mismatch")
+            if (modem / "idVendor").read_text().strip().lower() != str(self.config.usb_vendor).lower() or \
+               (modem / "idProduct").read_text().strip().lower() != str(self.config.usb_product).lower():
+                raise ValueError("USB modem identity mismatch")
+            network_device = Path(self.config.net_sysfs_root) / self.config.modem_interface / "device"
+            if network_device.resolve().parent != modem.resolve():
+                raise ValueError("modem interface is not attached to expected USB device")
+            other_devices = [path.name for path in root.iterdir()
+                             if (re.fullmatch(r"1-1\.\d+(?:\.\d+)*", path.name) and path.name != modem_name)
+                             or re.fullmatch(r"2-[1-9]\d*(?:\.\d+)*", path.name)]
+            if other_devices:
+                raise ValueError(f"other USB devices share power switch: {','.join(other_devices)}")
+        except (OSError, ValueError) as exc:
+            return f"skipped modem VBUS cycle: {exc}"
+
+        unit_base = f"dtu-modem-vbus-on-{int(self.now())}"
+        on_command = ["/usr/sbin/uhubctl", "-l", hub_name, "-a", "on"]
+        for suffix, delay in (("a", "45s"), ("b", "110s")):
+            result = self.run_command(["systemd-run", f"--unit={unit_base}-{suffix}",
+                                       f"--on-active={delay}", *on_command], 10)
+            if result.returncode != 0:
+                return f"skipped modem VBUS cycle: failed to arm power-on timer {suffix}"
+        now = self.now()
+        self.state["last_vbus_cycle"] = now
+        self.state.setdefault("vbus_cycles", []).append(now)
+        self.save_state()
+        result = self.run_command(["/usr/sbin/uhubctl", "-l", hub_name, "-a", "off"], 20)
+        if result.returncode != 0:
+            return f"failed modem VBUS off; power-on timers armed: {self.compact_output(result.stderr) or result.returncode}"
+        return f"cycled modem VBUS on hub {hub_name}; power-on timers armed"
+
     def restart_tailscale(self) -> str:
         result = self.run_command(["systemctl", "restart", "tailscaled"], 20)
         self.state["last_tailscale_restart"] = self.now()
@@ -356,6 +429,9 @@ def parse_args():
     parser.add_argument("--usb-vendor")
     parser.add_argument("--usb-product")
     parser.add_argument("--modem-interface", default="eth1")
+    parser.add_argument("--vbus-hub")
+    parser.add_argument("--vbus-hub-vendor")
+    parser.add_argument("--vbus-hub-product")
     return parser.parse_args()
 
 
@@ -375,6 +451,9 @@ def main():
             usb_vendor=args.usb_vendor,
             usb_product=args.usb_product,
             modem_interface=args.modem_interface,
+            vbus_hub=args.vbus_hub,
+            vbus_hub_vendor=args.vbus_hub_vendor,
+            vbus_hub_product=args.vbus_hub_product,
         )
     ).evaluate()
     print(json.dumps(result, indent=2, sort_keys=True))

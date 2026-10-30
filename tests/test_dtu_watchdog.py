@@ -14,6 +14,10 @@ class DtuWatchdogTests(unittest.TestCase):
         self.addCleanup(tmpdir.cleanup)
         root = Path(tmpdir.name)
         device = root / "devices" / "1-1.1"
+        hub = root / "devices" / "1-1"
+        hub.mkdir(parents=True)
+        (hub / "idVendor").write_text("2109")
+        (hub / "idProduct").write_text("3431")
         interface = device / "1-1.1:1.0"
         interface.mkdir(parents=True)
         network = root / "net" / "eth1"
@@ -22,6 +26,62 @@ class DtuWatchdogTests(unittest.TestCase):
         for name, value in {"idVendor": "1286", "idProduct": "4e3d", "busnum": "1", "devnum": "5"}.items():
             (device / name).write_text(value)
         return root
+
+    def make_vbus_watchdog(self, root, runner, now=1000):
+        return DtuWatchdog(WatchdogConfig(
+            state_path=self.make_state_path(), event_log_path=self.make_event_path(), mode="auto",
+            usb_sysfs_root=str(root / "devices"), net_sysfs_root=str(root / "net"),
+            usb_device="1-1.1", usb_vendor="1286", usb_product="4e3d", modem_interface="eth1",
+            vbus_hub="1-1", vbus_hub_vendor="2109", vbus_hub_product="3431",
+            cloud_probe_url="https://example.invalid",
+        ), runner=runner, now=lambda: now)
+
+    def test_vbus_cycle_arms_two_on_timers_before_off(self):
+        root = self.make_usb_sysfs()
+        calls = []
+
+        def runner(command, timeout):
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0, stdout="")
+
+        watchdog = self.make_vbus_watchdog(root, runner)
+        watchdog.state.update(network_failures=12, last_usb_reset=700, last_throttled="throttled=0x50000")
+        self.assertTrue(watchdog.can_cycle_modem_vbus())
+        self.assertIn("cycled modem VBUS", watchdog.cycle_modem_vbus())
+        self.assertEqual([call[0] for call in calls], ["systemd-run", "systemd-run", "/usr/sbin/uhubctl"])
+        self.assertIn("--on-active=45s", calls[0])
+        self.assertIn("--on-active=110s", calls[1])
+        self.assertEqual(calls[2], ["/usr/sbin/uhubctl", "-l", "1-1", "-a", "off"])
+        self.assertFalse(watchdog.can_cycle_modem_vbus())
+
+    def test_vbus_cycle_fails_closed_for_other_device_or_timer_failure(self):
+        root = self.make_usb_sysfs()
+        calls = []
+
+        def runner(command, timeout):
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 1 if "--on-active=110s" in command else 0, stdout="")
+
+        watchdog = self.make_vbus_watchdog(root, runner)
+        (root / "devices" / "1-1.2").mkdir()
+        self.assertIn("other USB devices", watchdog.cycle_modem_vbus())
+        self.assertEqual(calls, [])
+        (root / "devices" / "1-1.2").rmdir()
+        self.assertIn("failed to arm", watchdog.cycle_modem_vbus())
+        self.assertFalse(any(call[0] == "/usr/sbin/uhubctl" for call in calls))
+
+    def test_vbus_cycle_requires_sustained_failure_and_no_current_undervoltage(self):
+        watchdog = self.make_vbus_watchdog(self.make_usb_sysfs(), lambda c, t: subprocess.CompletedProcess(c, 0))
+        watchdog.state.update(network_failures=11, last_usb_reset=700, last_throttled="throttled=0x50000")
+        self.assertFalse(watchdog.can_cycle_modem_vbus())
+        watchdog.state["network_failures"] = 12
+        self.assertTrue(watchdog.can_cycle_modem_vbus())
+        watchdog.state["last_healthy"] = {"general": 900}
+        self.assertFalse(watchdog.can_cycle_modem_vbus())
+        watchdog.state["last_healthy"] = {"general": 600}
+        self.assertTrue(watchdog.can_cycle_modem_vbus())
+        watchdog.state["last_throttled"] = "throttled=0x50001"
+        self.assertFalse(watchdog.can_cycle_modem_vbus())
 
     def make_state_path(self):
         tmpdir = tempfile.TemporaryDirectory()
