@@ -167,12 +167,33 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Huawei SUN2000 DeviceShifu Driver", lifespan=lifespan)
 
 
+def cloud_delivery_status(collector_status: Dict[str, Any], now: Optional[datetime] = None) -> Dict[str, Any]:
+    now = now or datetime.now(timezone.utc)
+    pending = collector_status.get("spool_pending", 0)
+    failures = collector_status.get("consecutive_upload_failures", 0)
+    oldest = collector_status.get("spool_oldest_at")
+    oldest_age_seconds = None
+    if oldest:
+        oldest_age_seconds = max(0, int((now - datetime.fromisoformat(oldest.replace("Z", "+00:00"))).total_seconds()))
+    degraded = pending > 0 and (failures > 0 or (oldest_age_seconds is not None and oldest_age_seconds > 600))
+    return {
+        "status": "degraded" if degraded else "healthy",
+        "reason": ("Upload failures with pending spool" if failures > 0 else "Oldest pending point exceeds ten minutes") if degraded else None,
+        "pending": pending,
+        "oldest_age_seconds": oldest_age_seconds,
+        "consecutive_upload_failures": failures,
+        "last_successful_upload_at": collector_status.get("last_successful_upload_at"),
+        "last_error": collector_status.get("spool_last_drain_error"),
+    }
+
+
 async def build_health_payload():
     collector_status = data_collector.get_status()
     api_modbus_connected = modbus_client.is_connected()
     collector_modbus_connected = data_collector.modbus_client.is_connected()
     influx_connected = influxdb_writer.is_connected()
     collector_ready = data_collector.is_ready()
+    cloud_delivery = cloud_delivery_status(collector_status)
 
     unhealthy_components = []
     if not api_modbus_connected:
@@ -187,7 +208,7 @@ async def build_health_payload():
         unhealthy_components.append("collection_freshness")
 
     return {
-        "status": "healthy" if not unhealthy_components else "unhealthy",
+        "status": "unhealthy" if unhealthy_components else ("degraded" if cloud_delivery["status"] == "degraded" else "healthy"),
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "liveness": {
             "status": "alive",
@@ -210,6 +231,7 @@ async def build_health_payload():
             },
             "data_collector": collector_status,
             "influxdb": await influxdb_writer.health_check(),
+            "cloud_delivery": cloud_delivery,
         },
         "unhealthy_components": unhealthy_components,
     }
