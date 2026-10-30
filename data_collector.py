@@ -385,7 +385,17 @@ class DataCollector:
     async def _upload_batch(self):
         """Upload batched data to InfluxDB"""
         if self.telemetry_spool:
-            return await self._drain_spool_batch()
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 40
+            for _ in range(5):
+                if not await self._drain_spool_batch():
+                    return False
+                stats = self.telemetry_spool.stats()
+                if stats["spool_pending"] == 0 and stats["spool_acknowledged"] == 0:
+                    return True
+                if loop.time() >= deadline:
+                    break
+            return True
 
         if not self.data_buffer and not self.alarm_event_buffer:
             logger.debug("No data to upload")
@@ -503,13 +513,12 @@ class DataCollector:
         if not records:
             return True
         verified = []
-        for record in records:
-            if await influxdb_writer.verify_spool_records([record]):
+        results = await influxdb_writer.verify_spool_record_results(records)
+        for record, success in zip(records, results):
+            if success:
                 verified.append(record)
             else:
                 self.telemetry_spool.mark_verification_error([record], "Influx readback verification failed")
-                if getattr(influxdb_writer, "last_readback_error", None):
-                    break
         if verified:
             self.telemetry_spool.mark_drained(verified)
             self.last_cloud_readback_at = datetime.now(timezone.utc)

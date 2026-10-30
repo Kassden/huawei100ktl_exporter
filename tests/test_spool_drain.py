@@ -70,7 +70,7 @@ class SpoolDrainTests(unittest.TestCase):
         self.addCleanup(recovered.telemetry_spool.close)
         self.assertEqual(recovered.telemetry_spool.pending_batch()[0].source_ts, original_ts)
         with patch.object(data_collector.influxdb_writer, "write_spool_records", new=AsyncMock(return_value=True)) as write, \
-             patch.object(data_collector.influxdb_writer, "verify_spool_records", new=AsyncMock(return_value=True)):
+             patch.object(data_collector.influxdb_writer, "verify_spool_record_results", new=AsyncMock(return_value=[True])):
             self.assertTrue(asyncio.run(recovered._drain_spool_batch()))
         self.assertEqual(write.await_args.args[0][0].source_ts, original_ts)
         self.assertEqual(recovered.last_verified_source_ts, original_ts)
@@ -125,7 +125,7 @@ class SpoolDrainTests(unittest.TestCase):
         )
 
         with patch.object(data_collector.influxdb_writer, "write_spool_records", new=AsyncMock(return_value=True)), \
-             patch.object(data_collector.influxdb_writer, "verify_spool_records", new=AsyncMock(return_value=True)):
+             patch.object(data_collector.influxdb_writer, "verify_spool_record_results", new=AsyncMock(return_value=[True])):
             result = asyncio.run(collector._drain_spool_batch())
 
         self.assertTrue(result)
@@ -144,7 +144,7 @@ class SpoolDrainTests(unittest.TestCase):
         )
 
         with patch.object(data_collector.influxdb_writer, "write_spool_records", new=AsyncMock(return_value=True)), \
-             patch.object(data_collector.influxdb_writer, "verify_spool_records", new=AsyncMock(return_value=False)):
+             patch.object(data_collector.influxdb_writer, "verify_spool_record_results", new=AsyncMock(return_value=[False])):
             result = asyncio.run(collector._drain_spool_batch())
 
         self.assertFalse(result)
@@ -166,7 +166,7 @@ class SpoolDrainTests(unittest.TestCase):
         self.addCleanup(collector.telemetry_spool.close)
 
         with patch.object(data_collector.influxdb_writer, "write_spool_records", new=AsyncMock()) as write, \
-             patch.object(data_collector.influxdb_writer, "verify_spool_records", new=AsyncMock(return_value=True)):
+             patch.object(data_collector.influxdb_writer, "verify_spool_record_results", new=AsyncMock(return_value=[True])):
             result = asyncio.run(collector._drain_spool_batch())
 
         self.assertTrue(result)
@@ -183,7 +183,7 @@ class SpoolDrainTests(unittest.TestCase):
         collector.telemetry_spool.mark_acknowledged(collector.telemetry_spool.pending_batch()[:1])
 
         with patch.object(data_collector.influxdb_writer, "write_spool_records", new=AsyncMock(return_value=True)) as write, \
-             patch.object(data_collector.influxdb_writer, "verify_spool_records", new=AsyncMock(side_effect=[False, True])):
+             patch.object(data_collector.influxdb_writer, "verify_spool_record_results", new=AsyncMock(side_effect=[[False], [True]])):
             result = asyncio.run(collector._drain_spool_batch())
 
         self.assertFalse(result)
@@ -203,8 +203,42 @@ class SpoolDrainTests(unittest.TestCase):
             ))
         self.assertEqual(len(collector.telemetry_spool.pending_batch()), 2)
 
+    def test_scheduled_replay_has_five_batch_limit(self):
+        collector = DataCollector()
+        collector.telemetry_spool = Mock()
+        collector.telemetry_spool.stats.return_value = {"spool_pending": 1000, "spool_acknowledged": 0}
+        collector._drain_spool_batch = AsyncMock(return_value=True)
+        self.assertTrue(asyncio.run(collector._upload_batch()))
+        self.assertEqual(collector._drain_spool_batch.await_count, 5)
+
+    def test_scheduled_replay_stops_at_first_failure(self):
+        collector = DataCollector()
+        collector.telemetry_spool = Mock()
+        collector.telemetry_spool.stats.return_value = {"spool_pending": 1000, "spool_acknowledged": 0}
+        collector._drain_spool_batch = AsyncMock(side_effect=[True, False])
+        self.assertFalse(asyncio.run(collector._upload_batch()))
+        self.assertEqual(collector._drain_spool_batch.await_count, 2)
+
 
 class ReadbackTests(unittest.TestCase):
+    def test_readback_caps_concurrent_queries_at_four(self):
+        writer = InfluxDBWriter()
+        writer.client = Mock()
+        active = 0
+        peak = 0
+
+        async def fake_verify(query_api, record):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0.001)
+            active -= 1
+            return True
+
+        writer._verify_single_spool_record = fake_verify
+        self.assertEqual(asyncio.run(writer.verify_spool_record_results(list(range(20)))), [True] * 20)
+        self.assertEqual(peak, 4)
+
     def test_spooled_line_protocol_is_written_with_second_precision(self):
         writer = InfluxDBWriter()
         writer.client = Mock()

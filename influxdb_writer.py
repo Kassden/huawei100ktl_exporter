@@ -218,19 +218,24 @@ class InfluxDBWriter:
             return False
 
     async def verify_spool_records(self, records: List[SpoolRecord]) -> bool:
+        return all(await self.verify_spool_record_results(records))
+
+    async def verify_spool_record_results(self, records: List[SpoolRecord]) -> List[bool]:
         if not records:
-            return True
+            return []
         if not self.client and not await self.connect():
             self.last_readback_error = "InfluxDB unavailable"
-            return False
-        query_api = self.client.query_api()
-        for record in records:
-            if not await self._verify_single_spool_record(query_api, record):
-                return False
-        return True
+            return [False] * len(records)
+        self.last_readback_error = None
+        semaphore = asyncio.Semaphore(4)
+
+        async def verify_one(record: SpoolRecord) -> bool:
+            async with semaphore:
+                return await self._verify_single_spool_record(self.client.query_api(), record)
+
+        return await asyncio.gather(*(verify_one(record) for record in records))
 
     async def _verify_single_spool_record(self, query_api, record: SpoolRecord) -> bool:
-        self.last_readback_error = None
         source_ts = datetime.fromisoformat(record.source_ts.replace("Z", "+00:00"))
         start = source_ts.replace(microsecond=0).timestamp() - 1
         stop = source_ts.replace(microsecond=0).timestamp() + 1
