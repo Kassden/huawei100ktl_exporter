@@ -147,11 +147,30 @@ class AlarmEventTests(unittest.TestCase):
         line_protocol = writer._create_alarm_event_point(event).to_line_protocol()
 
         self.assertIn("source_field=alarm_3", line_protocol)
-        self.assertIn("alarm_code=2015", line_protocol)
-        self.assertIn("source_bit=6", line_protocol)
+        tags, _, fields = line_protocol.partition(" ")
+        self.assertIn("event_key=2015:6", tags)
+        self.assertNotIn("alarm_code=", tags)
+        self.assertNotIn("source_bit=", tags)
+        self.assertIn("alarm_code=2015", fields)
+        self.assertIn("source_bit=6", fields)
         self.assertIn('decoded_alarm_title="String loss"', line_protocol)
         self.assertIn('decoded_alarm_source_name_zh="组串丢失"', line_protocol)
         self.assertIn('decoded_huawei_severity="提示"', line_protocol)
+
+    def test_same_second_alarm_bits_have_distinct_point_identity(self):
+        writer = InfluxDBWriter()
+        base = dict(timestamp=datetime(2026, 7, 9, tzinfo=timezone.utc),
+                    device_id="device-1", site_id="site-1", event_type="alarm_transition",
+                    source_field="alarm_1", previous_value=0, current_value=1,
+                    severity="major")
+        first = AlarmEventPoint(**base, alarm_code=2001, source_bit=0)
+        second = AlarmEventPoint(**base, alarm_code=2011, source_bit=2)
+        self.assertNotEqual(writer.alarm_event_tags(first), writer.alarm_event_tags(second))
+        for event in (first, second):
+            tags = writer.alarm_event_tags(event)
+            fields = writer.alarm_event_fields(event)
+            self.assertFalse(set(tags) & set(fields))
+            self.assertIn(f"event_key={tags['event_key']}", writer._create_alarm_event_point(event).to_line_protocol())
 
     def test_exporter_alarm_decoder_matches_alarm_bit_contract(self):
         contract = load_contract("huawei-alarm-bits.json")

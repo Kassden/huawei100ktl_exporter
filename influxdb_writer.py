@@ -140,11 +140,9 @@ class InfluxDBWriter:
             .tag("event_type", event.event_type)
             .tag("source_field", event.source_field)
             .tag("severity", event.severity)
-            .tag("alarm_code", str(event.alarm_code))
+            .tag("event_key", self.alarm_event_key(event.alarm_code, event.source_bit))
             .time(event.timestamp, WritePrecision.S)
         )
-        if event.source_bit is not None:
-            point = point.tag("source_bit", str(event.source_bit))
         point = point.field("alarm_code", float(event.alarm_code))
         if event.previous_value is not None:
             point = point.field("previous_value", float(event.previous_value))
@@ -171,11 +169,13 @@ class InfluxDBWriter:
             "event_type": event.event_type,
             "source_field": event.source_field,
             "severity": event.severity,
-            "alarm_code": str(event.alarm_code),
+            "event_key": self.alarm_event_key(event.alarm_code, event.source_bit),
         }
-        if event.source_bit is not None:
-            tags["source_bit"] = str(event.source_bit)
         return tags
+
+    @staticmethod
+    def alarm_event_key(alarm_code: int, source_bit: Optional[int]) -> str:
+        return f"{alarm_code}:{source_bit if source_bit is not None else 'none'}"
 
     def alarm_event_fields(self, event: AlarmEventPoint) -> Dict[str, Any]:
         fields: Dict[str, Any] = {"alarm_code": float(event.alarm_code)}
