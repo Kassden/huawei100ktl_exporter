@@ -16,6 +16,8 @@ TimeoutStartSec=30
 TimeoutStopSec=20
 NoNewPrivileges=true
 PrivateTmp=true
+StateDirectory=huawei-exporter
+StateDirectoryMode=0700
 
 [Install]
 WantedBy=multi-user.target

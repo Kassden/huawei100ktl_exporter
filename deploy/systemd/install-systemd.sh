@@ -8,6 +8,8 @@ ENV_FILE="${ENV_FILE:-/etc/huawei-exporter.env}"
 STAGED_ENV_FILE="${STAGED_ENV_FILE:-${APP_DIR}/.env.pi4b.local}"
 SYSTEMD_DIR="${SYSTEMD_DIR:-/etc/systemd/system}"
 UNIT_PATH="${SYSTEMD_DIR}/${SERVICE_NAME}.service"
+WATCHDOG_SERVICE_PATH="${SYSTEMD_DIR}/dtu-watchdog.service"
+WATCHDOG_TIMER_PATH="${SYSTEMD_DIR}/dtu-watchdog.timer"
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 require_root() {
@@ -75,6 +77,14 @@ install_unit() {
     "${APP_DIR}/deploy/systemd/huawei-exporter.service" > "${UNIT_PATH}"
   chmod 644 "${UNIT_PATH}"
   echo "Installed systemd unit to ${UNIT_PATH}."
+
+  sed \
+    -e "s|/opt/huawei100ktl_exporter|${APP_DIR}|g" \
+    -e "s|/etc/huawei-exporter.env|${ENV_FILE}|g" \
+    "${APP_DIR}/deploy/systemd/dtu-watchdog.service" > "${WATCHDOG_SERVICE_PATH}"
+  cp "${APP_DIR}/deploy/systemd/dtu-watchdog.timer" "${WATCHDOG_TIMER_PATH}"
+  chmod 644 "${WATCHDOG_SERVICE_PATH}" "${WATCHDOG_TIMER_PATH}"
+  echo "Installed optional watchdog units to ${WATCHDOG_SERVICE_PATH} and ${WATCHDOG_TIMER_PATH}."
 }
 
 enable_service() {
@@ -103,6 +113,8 @@ ${env_step}
    sudo systemctl status ${SERVICE_NAME}.service
 4. Verify locally:
    ${APP_DIR}/deploy/systemd/verify-local.sh
+5. Optional: enable observe-only watchdog after reviewing the unit:
+   sudo systemctl enable --now dtu-watchdog.timer
 EOF
 }
 

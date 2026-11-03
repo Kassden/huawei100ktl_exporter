@@ -1,0 +1,457 @@
+import os
+import json
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+from dtu_watchdog import DtuWatchdog, WatchdogConfig
+
+
+class DtuWatchdogTests(unittest.TestCase):
+    def make_usb_sysfs(self):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        root = Path(tmpdir.name)
+        device = root / "devices" / "1-1.1"
+        hub = root / "devices" / "1-1"
+        hub.mkdir(parents=True)
+        (hub / "idVendor").write_text("2109")
+        (hub / "idProduct").write_text("3431")
+        interface = device / "1-1.1:1.0"
+        interface.mkdir(parents=True)
+        network = root / "net" / "eth1"
+        network.mkdir(parents=True)
+        (network / "device").symlink_to(interface)
+        for name, value in {"idVendor": "1286", "idProduct": "4e3d", "busnum": "1", "devnum": "5"}.items():
+            (device / name).write_text(value)
+        return root
+
+    def make_vbus_watchdog(self, root, runner, now=1000):
+        return DtuWatchdog(WatchdogConfig(
+            state_path=self.make_state_path(), event_log_path=self.make_event_path(), mode="auto",
+            usb_sysfs_root=str(root / "devices"), net_sysfs_root=str(root / "net"),
+            usb_device="1-1.1", usb_vendor="1286", usb_product="4e3d", modem_interface="eth1",
+            vbus_hub="1-1", vbus_hub_vendor="2109", vbus_hub_product="3431",
+            cloud_probe_url="https://example.invalid",
+        ), runner=runner, now=lambda: now)
+
+    def test_vbus_cycle_arms_two_on_timers_before_off(self):
+        root = self.make_usb_sysfs()
+        calls = []
+
+        def runner(command, timeout):
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0, stdout="")
+
+        watchdog = self.make_vbus_watchdog(root, runner)
+        watchdog.state.update(network_failures=12, last_usb_reset=700, last_throttled="throttled=0x50000")
+        self.assertTrue(watchdog.can_cycle_modem_vbus())
+        self.assertIn("cycled modem VBUS", watchdog.cycle_modem_vbus())
+        self.assertEqual([call[0] for call in calls], ["systemd-run", "systemd-run", "/usr/sbin/uhubctl"])
+        self.assertIn("--on-active=45s", calls[0])
+        self.assertIn("--on-active=110s", calls[1])
+        self.assertEqual(calls[2], ["/usr/sbin/uhubctl", "-l", "1-1", "-a", "off"])
+        self.assertFalse(watchdog.can_cycle_modem_vbus())
+
+    def test_vbus_cycle_fails_closed_for_other_device_or_timer_failure(self):
+        root = self.make_usb_sysfs()
+        calls = []
+
+        def runner(command, timeout):
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 1 if "--on-active=110s" in command else 0, stdout="")
+
+        watchdog = self.make_vbus_watchdog(root, runner)
+        (root / "devices" / "1-1.2").mkdir()
+        self.assertIn("other USB devices", watchdog.cycle_modem_vbus())
+        self.assertEqual(calls, [])
+        (root / "devices" / "1-1.2").rmdir()
+        self.assertIn("failed to arm", watchdog.cycle_modem_vbus())
+        self.assertFalse(any(call[0] == "/usr/sbin/uhubctl" for call in calls))
+
+    def test_vbus_cycle_requires_sustained_failure_and_no_current_undervoltage(self):
+        watchdog = self.make_vbus_watchdog(self.make_usb_sysfs(), lambda c, t: subprocess.CompletedProcess(c, 0))
+        watchdog.state.update(network_failures=11, last_usb_reset=700, last_throttled="throttled=0x50000")
+        self.assertFalse(watchdog.can_cycle_modem_vbus())
+        watchdog.state["network_failures"] = 12
+        self.assertTrue(watchdog.can_cycle_modem_vbus())
+        watchdog.state["last_healthy"] = {"general": 900}
+        self.assertFalse(watchdog.can_cycle_modem_vbus())
+        watchdog.state["last_healthy"] = {"general": 600}
+        self.assertTrue(watchdog.can_cycle_modem_vbus())
+        watchdog.state["last_throttled"] = "throttled=0x50001"
+        self.assertFalse(watchdog.can_cycle_modem_vbus())
+
+    def make_state_path(self):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        return os.path.join(tmpdir.name, "state.json")
+
+    def make_event_path(self):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        return os.path.join(tmpdir.name, "events.jsonl")
+
+    def test_observe_mode_never_runs_reconnect_actions(self):
+        calls = []
+
+        def runner(command, timeout):
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 1)
+
+        watchdog = DtuWatchdog(
+            WatchdogConfig(
+                state_path=self.make_state_path(),
+                event_log_path=self.make_event_path(),
+                mode="observe",
+                networkmanager_connection="wwan0",
+            ),
+            runner=runner,
+            now=lambda: 1_000,
+        )
+
+        result = watchdog.evaluate()
+        self.assertEqual(result["general_connectivity"], "degraded")
+        self.assertEqual(result["actions"], [])
+        self.assertFalse(any(command[:3] == ["nmcli", "connection", "down"] for command in calls))
+
+    def test_auto_mode_reconnects_only_after_three_network_failures(self):
+        calls = []
+        now = 1_000
+
+        def runner(command, timeout):
+            calls.append(command)
+            if command[0] == "ping":
+                return subprocess.CompletedProcess(command, 1)
+            return subprocess.CompletedProcess(command, 0, stdout="")
+
+        path = self.make_state_path()
+        for _ in range(3):
+            watchdog = DtuWatchdog(
+                WatchdogConfig(state_path=path, mode="auto", networkmanager_connection="wwan0"),
+                runner=runner,
+                now=lambda: now,
+            )
+            result = watchdog.evaluate()
+
+        self.assertEqual(result["actions"], ["reconnected NetworkManager connection wwan0"])
+        self.assertIn(["nmcli", "connection", "down", "wwan0"], calls)
+        self.assertIn(["nmcli", "connection", "up", "wwan0"], calls)
+
+    def test_exporter_only_failure_does_not_reconnect_modem(self):
+        calls = []
+
+        def runner(command, timeout):
+            calls.append(command)
+            if command[0] == "curl":
+                return subprocess.CompletedProcess(command, 1, stdout="")
+            return subprocess.CompletedProcess(command, 0, stdout="")
+
+        watchdog = DtuWatchdog(
+            WatchdogConfig(
+                state_path=self.make_state_path(),
+                event_log_path=self.make_event_path(),
+                mode="auto",
+                networkmanager_connection="wwan0",
+            ),
+            runner=runner,
+            now=lambda: 1_000,
+        )
+        result = watchdog.evaluate()
+
+        self.assertEqual(result["general_connectivity"], "healthy")
+        self.assertEqual(result["exporter_health"], "degraded")
+        self.assertEqual(result["actions"], [])
+        self.assertFalse(any(command[:3] == ["nmcli", "connection", "down"] for command in calls))
+        self.assertFalse(any(command[:3] == ["nmcli", "connection", "up"] for command in calls))
+
+    def test_tailscale_degraded_with_general_connectivity_restarts_tailscale_first(self):
+        calls = []
+        now = 1_000
+
+        def runner(command, timeout):
+            calls.append(command)
+            if command[:3] == ["systemctl", "is-active", "--quiet"]:
+                return subprocess.CompletedProcess(command, 1, stdout="")
+            return subprocess.CompletedProcess(command, 0, stdout="throttled=0x0")
+
+        path = self.make_state_path()
+        for _ in range(3):
+            watchdog = DtuWatchdog(
+                WatchdogConfig(state_path=path, mode="auto", networkmanager_connection="Wired connection 2"),
+                runner=runner,
+                now=lambda: now,
+            )
+            result = watchdog.evaluate()
+
+        self.assertEqual(result["general_connectivity"], "healthy")
+        self.assertEqual(result["tailscale_connectivity"], "degraded")
+        self.assertEqual(result["actions"], ["restarted tailscaled"])
+        self.assertIn(["systemctl", "restart", "tailscaled"], calls)
+        self.assertFalse(any(command[:3] == ["nmcli", "connection", "down"] for command in calls))
+
+    def test_probe_failure_does_not_restart_service_or_reconnect_network(self):
+        calls = []
+        now = 1_000
+
+        def runner(command, timeout):
+            calls.append(command)
+            if command[:2] == ["tailscale", "netcheck"]:
+                return subprocess.CompletedProcess(command, 1, stdout="")
+            return subprocess.CompletedProcess(command, 0, stdout="")
+
+        path = self.make_state_path()
+        for _ in range(6):
+            watchdog = DtuWatchdog(
+                WatchdogConfig(
+                    state_path=path,
+                    mode="auto",
+                    networkmanager_connection="Wired connection 2",
+                    tailscale_restart_cooldown_seconds=9999,
+                ),
+                runner=runner,
+                now=lambda: now,
+            )
+            result = watchdog.evaluate()
+
+        self.assertEqual(result["actions"], [])
+        self.assertNotIn(["systemctl", "restart", "tailscaled"], calls)
+        self.assertNotIn(["nmcli", "connection", "down", "Wired connection 2"], calls)
+
+    def test_gateway_probe_failure_with_internet_healthy_does_not_reconnect(self):
+        calls = []
+
+        def runner(command, timeout):
+            calls.append(command)
+            if command[:2] == ["ping", "-c"] and command[-1] == "192.168.0.1":
+                return subprocess.CompletedProcess(command, 1)
+            return subprocess.CompletedProcess(command, 0, stdout="")
+
+        path = self.make_state_path()
+        for _ in range(3):
+            result = DtuWatchdog(
+                WatchdogConfig(state_path=path, event_log_path=self.make_event_path(), mode="auto", networkmanager_connection="Wired connection 2"),
+                runner=runner,
+                now=lambda: 1_000,
+            ).evaluate()
+
+        self.assertEqual(result["gateway"], "degraded")
+        self.assertEqual(result["general_connectivity"], "healthy")
+        self.assertEqual(result["actions"], [])
+        self.assertNotIn(["nmcli", "connection", "down", "Wired connection 2"], calls)
+
+    def test_reconnect_failure_is_recorded_and_rate_limited(self):
+        calls = []
+
+        def runner(command, timeout):
+            calls.append(command)
+            if command[0] == "ping":
+                return subprocess.CompletedProcess(command, 1)
+            if command[:3] == ["nmcli", "connection", "up"]:
+                return subprocess.CompletedProcess(command, 1, stderr="activation failed")
+            return subprocess.CompletedProcess(command, 0, stdout="")
+
+        path = self.make_state_path()
+        third_action = None
+        for attempt in range(4):
+            result = DtuWatchdog(
+                WatchdogConfig(state_path=path, event_log_path=self.make_event_path(), mode="auto", networkmanager_connection="Wired connection 2"),
+                runner=runner,
+                now=lambda: 1_000,
+            ).evaluate()
+            if attempt == 2:
+                third_action = result["actions"]
+
+        self.assertEqual(third_action, ["failed to reconnect NetworkManager connection Wired connection 2: activation failed"])
+        self.assertEqual(result["actions"], [])
+        self.assertEqual(sum(command[:3] == ["nmcli", "connection", "up"] for command in calls), 1)
+
+    def test_auto_escalates_to_identified_usb_modem_after_reconnect_fails(self):
+        calls = []
+        root = self.make_usb_sysfs()
+        state_path = self.make_state_path()
+
+        def runner(command, timeout):
+            calls.append(command)
+            failed = command[0] == "ping" or (command[0] == "curl" and "https://influx.example" in command)
+            return subprocess.CompletedProcess(command, 1 if failed else 0, stdout="")
+
+        for minute in range(12):
+            result = DtuWatchdog(
+                WatchdogConfig(
+                    state_path=state_path,
+                    event_log_path=self.make_event_path(),
+                    mode="auto",
+                    networkmanager_connection="Wired connection 2",
+                    cloud_probe_url="https://influx.example",
+                    usb_device="1-1.1",
+                    usb_vendor="1286",
+                    usb_product="4e3d",
+                    usb_sysfs_root=str(root / "devices"),
+                    net_sysfs_root=str(root / "net"),
+                ),
+                runner=runner,
+                now=lambda minute=minute: 1000 + minute * 60,
+            ).evaluate()
+
+        self.assertEqual(sum(command[:3] == ["nmcli", "connection", "down"] for command in calls), 1)
+        self.assertEqual([command for command in calls if command[0] == "usbreset"], [["usbreset", "001/005"]])
+        self.assertEqual(result["cloud_reachability"], "degraded")
+        state = json.loads(Path(state_path).read_text())
+        self.assertEqual(len(state["usb_resets"]), 1)
+
+    def test_healthy_cloud_path_prevents_modem_reset_when_ping_fails(self):
+        calls = []
+
+        def runner(command, timeout):
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 1 if command[0] == "ping" else 0, stdout="")
+
+        path = self.make_state_path()
+        for minute in range(8):
+            result = DtuWatchdog(
+                WatchdogConfig(
+                    state_path=path,
+                    event_log_path=self.make_event_path(),
+                    mode="auto",
+                    networkmanager_connection="Wired connection 2",
+                    cloud_probe_url="https://influx.example",
+                    usb_device="1-1.1",
+                ),
+                runner=runner,
+                now=lambda minute=minute: 1000 + minute * 60,
+            ).evaluate()
+
+        self.assertEqual(result["general_connectivity"], "healthy")
+        self.assertEqual(result["network_failures"], 0)
+        self.assertFalse(any(command[0] == "usbreset" or command[:2] == ["nmcli", "connection"] for command in calls))
+
+    def test_usb_identity_mismatch_refuses_reset(self):
+        calls = []
+        root = self.make_usb_sysfs()
+        state_path = self.make_state_path()
+
+        def runner(command, timeout):
+            calls.append(command)
+            failed = command[0] == "ping" or (command[0] == "curl" and "https://influx.example" in command)
+            return subprocess.CompletedProcess(command, 1 if failed else 0, stdout="")
+
+        for minute in range(6):
+            result = DtuWatchdog(
+                WatchdogConfig(
+                    state_path=state_path,
+                    event_log_path=self.make_event_path(),
+                    mode="auto",
+                    networkmanager_connection="Wired connection 2",
+                    cloud_probe_url="https://influx.example",
+                    usb_device="1-1.1",
+                    usb_vendor="ffff",
+                    usb_product="4e3d",
+                    usb_sysfs_root=str(root / "devices"),
+                    net_sysfs_root=str(root / "net"),
+                ),
+                runner=runner,
+                now=lambda minute=minute: 1000 + minute * 60,
+            ).evaluate()
+
+        self.assertIn("skipped USB modem reset: USB vendor/product mismatch", result["actions"])
+        self.assertFalse(any(command[0] == "usbreset" for command in calls))
+
+    def test_usb_reset_limit_allows_six_per_rolling_day(self):
+        watchdog = DtuWatchdog(
+            WatchdogConfig(
+                state_path=self.make_state_path(),
+                cloud_probe_url="https://influx.example",
+            ),
+            now=lambda: 100_000,
+        )
+        watchdog.state.update({
+            "network_failures": 6,
+            "last_modem_reconnect": 95_000,
+            "last_usb_reset": 96_000,
+            "usb_resets": [90_000, 91_000, 92_000, 93_000, 96_000],
+        })
+        self.assertTrue(watchdog.can_reset_modem_usb())
+        watchdog.state["usb_resets"].append(97_000)
+        self.assertFalse(watchdog.can_reset_modem_usb())
+
+    def test_degraded_check_writes_compact_event_log_with_evidence(self):
+        event_path = self.make_event_path()
+
+        def runner(command, timeout):
+            if command[:2] == ["tailscale", "netcheck"]:
+                return subprocess.CompletedProcess(command, 1, stdout='{"UDP":false}')
+            if command[:3] == ["ip", "route", "get"]:
+                return subprocess.CompletedProcess(command, 0, stdout="1.1.1.1 via 192.168.0.1 dev eth1\n")
+            if command[:2] == ["nmcli", "-t"]:
+                return subprocess.CompletedProcess(command, 0, stdout="eth1:ethernet:connected:Wired connection 2\n")
+            return subprocess.CompletedProcess(command, 0, stdout="")
+
+        watchdog = DtuWatchdog(
+            WatchdogConfig(
+                state_path=self.make_state_path(),
+                event_log_path=event_path,
+                mode="observe",
+            ),
+            runner=runner,
+            now=lambda: 1_000,
+        )
+        result = watchdog.evaluate()
+
+        self.assertEqual(result["tailscale_connectivity"], "degraded")
+        with open(event_path) as handle:
+            events = [json.loads(line) for line in handle]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["tailscale_connectivity"], "degraded")
+        self.assertEqual(events[0]["evidence"]["route_to_internet"], "1.1.1.1 via 192.168.0.1 dev eth1")
+        self.assertEqual(events[0]["evidence"]["tailscale_netcheck"], {"UDP": False})
+
+    def test_throttled_nonzero_creates_warning_without_recovery_action(self):
+        event_path = self.make_event_path()
+
+        def runner(command, timeout):
+            if command[0] == "vcgencmd":
+                return subprocess.CompletedProcess(command, 0, stdout="throttled=0x50000\n")
+            return subprocess.CompletedProcess(command, 0, stdout="")
+
+        watchdog = DtuWatchdog(
+            WatchdogConfig(
+                state_path=self.make_state_path(),
+                event_log_path=event_path,
+                mode="auto",
+                networkmanager_connection="Wired connection 2",
+            ),
+            runner=runner,
+            now=lambda: 1_000,
+        )
+        result = watchdog.evaluate()
+
+        self.assertIn("pi_throttled_nonzero", result["warnings"])
+        self.assertEqual(result["actions"], [])
+        with open(event_path) as handle:
+            event = json.loads(handle.readline())
+        self.assertEqual(event["throttled"], "throttled=0x50000")
+        self.assertIn("pi_throttled_nonzero", event["warnings"])
+
+    def test_last_healthy_timestamps_are_recorded(self):
+        path = self.make_state_path()
+
+        def runner(command, timeout):
+            return subprocess.CompletedProcess(command, 0, stdout="")
+
+        watchdog = DtuWatchdog(
+            WatchdogConfig(state_path=path, event_log_path=self.make_event_path()),
+            runner=runner,
+            now=lambda: 1_234,
+        )
+        result = watchdog.evaluate()
+
+        self.assertEqual(result["evidence"]["last_healthy"]["gateway"], 1_234)
+        self.assertEqual(result["evidence"]["last_healthy"]["general"], 1_234)
+        self.assertEqual(result["evidence"]["last_healthy"]["exporter"], 1_234)
+        self.assertEqual(result["evidence"]["last_healthy"]["tailscale"], 1_234)
+
+
+if __name__ == "__main__":
+    unittest.main()

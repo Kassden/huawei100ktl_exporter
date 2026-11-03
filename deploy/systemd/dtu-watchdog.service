@@ -1,0 +1,10 @@
+[Unit]
+Description=Huawei exporter DTU watchdog
+After=network-online.target huawei-exporter.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/huawei100ktl_exporter
+EnvironmentFile=/etc/huawei-exporter.env
+ExecStart=/opt/huawei100ktl_exporter/.venv/bin/python /opt/huawei100ktl_exporter/dtu_watchdog.py --mode observe --state-path /var/lib/huawei-exporter/dtu-watchdog-state.json

@@ -14,6 +14,8 @@ Use this document only for the service layout and install flow.
 ## Files
 
 - `huawei-exporter.service`
+- `dtu-watchdog.service`
+- `dtu-watchdog.timer`
 - `huawei-exporter.env.example`
 - `install-systemd.sh`
 - `push-to-pi.sh`
@@ -25,6 +27,8 @@ Use this document only for the service layout and install flow.
 - app directory: `/opt/huawei100ktl_exporter`
 - service user: `huawei-exporter`
 - env file: `/etc/huawei-exporter.env`
+- durable spool: `/var/lib/huawei-exporter/telemetry-spool.sqlite3`
+- watchdog state: `/var/lib/huawei-exporter/dtu-watchdog-state.json`
 
 ## Fast path
 
@@ -88,6 +92,7 @@ Because `install-systemd.sh` preserves `/etc/huawei-exporter.env` once it alread
 - installs `/etc/huawei-exporter.env` if it does not already exist
 - prefers `/opt/huawei100ktl_exporter/.env.pi4b.local` over the generic example on first install
 - installs and starts `huawei-exporter.service`
+- provides `dtu-watchdog.service` and `dtu-watchdog.timer`; enable the timer only after reviewing the mode and local network connection ID
 
 ## Manual install
 
@@ -140,6 +145,52 @@ sudo systemctl restart huawei-exporter.service
 sudo journalctl -u huawei-exporter.service -f
 sudo systemctl disable --now huawei-exporter.service
 ```
+
+## Durable spool
+
+The exporter uses a SQLite WAL spool when `SPOOL_ENABLED=true` is set in `/etc/huawei-exporter.env`. Existing installations default to disabled until explicitly commissioned:
+
+- database: `/var/lib/huawei-exporter/telemetry-spool.sqlite3`
+- one row per emitted Influx point
+- telemetry and `alarm_events` both pass through the same queue
+- rows are deleted only after synchronous write acknowledgement and cloud readback verification
+
+The systemd unit owns `/var/lib/huawei-exporter` as the `huawei-exporter` user with mode 0700. Confirm at least 512 MiB free beyond the 1 GiB spool budget before enabling. After restart, inspect `/ready`, `/collector/status`, the SQLite row counts, and a fresh cloud source timestamp. A deployment or merge alone does not enable the spool in an existing env file.
+
+Do not put the spool inside `/opt/huawei100ktl_exporter`, `/tmp`, or a release directory. On rollback, preserve `/var/lib/huawei-exporter/telemetry-spool.sqlite3` and its WAL/SHM files. Older memory-only exporter versions cannot drain this database, so rollback is a degraded durability state unless forward-compatible code is restored.
+
+Before live deployment, snapshot with the SQLite backup API or stop the service and copy all three WAL files together. Copying only the main database file while WAL mode is active is not a valid backup.
+
+## DTU watchdog
+
+The watchdog is installed as an optional systemd timer and defaults to observe-only mode:
+
+```bash
+sudo cp deploy/systemd/dtu-watchdog.service /etc/systemd/system/dtu-watchdog.service
+sudo cp deploy/systemd/dtu-watchdog.timer /etc/systemd/system/dtu-watchdog.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now dtu-watchdog.timer
+```
+
+Observe mode reports general connectivity, local exporter health, and `tailscaled` state but does not reconnect the modem or restart services.
+
+Automatic recovery requires a site-specific systemd drop-in after confirming the exact NetworkManager connection ID, USB topology, vendor/product ID, and `eth1` attachment. The checked-in Pi 4B example is `deploy/systemd/dtu-watchdog-pi4b-auto.conf`; the base unit remains observe-only. Install the drop-in under `/etc/systemd/system/dtu-watchdog.service.d/` and reload systemd only on that verified Pi.
+
+The auto command needs:
+
+```text
+--mode auto --networkmanager-connection <connection-id> --usb-device <usb-path> --usb-vendor <id> --usb-product <id> --modem-interface <interface>
+```
+
+The verified Pi 4B installation also passes `--vbus-hub 1-1 --vbus-hub-vendor 2109 --vbus-hub-product 3431`. This opts in to a full-hub power cycle only for that exact hub, modem `1286:4e3d` at `1-1.1`, and `eth1`, with no other USB devices attached. Leave these VBUS arguments out on unverified Pis.
+
+Automatic mode treats general connectivity as healthy if either the IP probe or an HTTP connection to `INFLUXDB_URL` succeeds. After three consecutive failures it reconnects NetworkManager, at most once per 15 minutes and three times per hour. If connectivity is still down after six checks and at least three minutes after the reconnect, it validates the USB device's identity and interface, then invokes `usbreset` on that device. USB resets are limited to once per hour and six times in a rolling 24-hour window. The attempt and cooldown are persisted before the reset. Tailscale restarts are allowed only when general connectivity is healthy and `tailscaled` itself is failed.
+
+`usbreset` resets USB enumeration; it is not an electrical power cycle. The Pi 4B's ports are ganged. A single-port `uhubctl -e -l 1-1 -p 1` command disconnected the modem but left it powered and did not restore the link. A separately supervised `uhubctl -l 1-1 -a off` test turned its lights fully off; timed `uhubctl -l 1-1 -a on` restored USB enumeration, `eth1`, and Tailscale without a Pi reboot. Never run the `off` command remotely without independent timed `on` commands and onsite recovery.
+
+With the verified Pi-specific drop-in, the watchdog considers full-hub power cycling only after 12 consecutive general network failures, a USB reset in the current outage, and no action in the same run. It skips current undervoltage and limits cycles to one per hour and four per rolling day. Before switching off, it validates the hub, modem, interface, and absence of other USB devices, then arms two independent systemd power-on timers for 45 and 110 seconds. A supervised cycle proved the electrical path and reconnect, but automatic recovery from a future real modem wedge has not yet been observed.
+
+The supervised full-hub power-on logged a brief Pi undervoltage event. Check the Pi power supply and modem load; a dedicated powered switched hub or supply may be needed for reliable repeated cycles. Watch `journalctl -u dtu-watchdog.service`, `/collector/status`, and cloud readback after commissioning.
 
 ## Verification
 
